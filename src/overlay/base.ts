@@ -1,0 +1,267 @@
+/**
+ * Overlay Base Module
+ *
+ * BaseOverlay — abstract base for all DOM overlays.
+ *
+ * Overlays are presentational DOM elements bound to a live view. They MAY
+ * read shared `State` in `onRender(state)` (e.g. the camera target to draw a
+ * marker), and they own their view-local presentation state (visibility,
+ * styling, position). View-local presentation is NOT part of the portable
+ * `State` document and does not round-trip through `getState()`.
+ */
+
+import type { State } from "../types";
+
+type OverlayBinding = {
+  getViewType() : string;
+  getLayerIds() : readonly string[];
+  getCanvas()   : HTMLCanvasElement | undefined;
+  isActive()    : boolean;
+};
+
+export type OverlayCornerPosition = "top-left" | "top-right" | "bottom-left" | "bottom-right";
+export type OverlayLabelVariant   = "badge" | "panel" | "tooltip";
+
+// ============================================================================
+// BASE OVERLAY
+// ============================================================================
+
+/**
+ * Static contract for overlay classes registered via `overlayRegistry`. Each
+ * concrete overlay declares its `overlayType` string and the registry
+ * instantiates via `new cls()` directly.
+ */
+export interface OverlayClass {
+  readonly overlayType: string;
+  new (): BaseOverlay;
+}
+
+export abstract class BaseOverlay {
+  protected root?: HTMLDivElement;
+
+  private hostEl?           : HTMLElement;
+  private binding?          : OverlayBinding;
+  private visible           = true;
+  private visibleWhenActive = false;
+
+  bindView(binding: OverlayBinding): void {
+    this.binding = binding;
+  }
+
+  mount(parent: HTMLElement): void {
+    this.unmount();
+
+    const root = document.createElement("div");
+    root.style.position       = "absolute";
+    root.style.pointerEvents  = "none";
+    root.style.zIndex         = "10";
+    root.style.display        = "none";
+
+    parent.style.position = parent.style.position || "relative";
+    parent.appendChild(root);
+
+    this.root   = root;
+    this.hostEl = parent;
+
+    this.configureRoot(root);
+    this.onMount(root, parent);
+    this.syncVisibility();
+  }
+
+  unmount(): void {
+    this.onUnmount();
+    if (this.root?.parentElement) this.root.parentElement.removeChild(this.root);
+    this.root   = undefined;
+    this.hostEl = undefined;
+  }
+
+  render(state: State): void {
+    if (!this.root) return;
+
+    if (!this.isVisible(state)) {
+      this.root.style.display = "none";
+      this.onHidden();
+      return;
+    }
+
+    this.root.style.display = this.getDisplayMode();
+    this.onRender(state);
+  }
+
+  /**
+   * Update view-local presentation options at runtime. Options not understood
+   * by the base overlay are forwarded to `onOptionsChanged` for subclasses.
+   */
+  setOptions(opts?: Record<string, unknown>): void {
+    if (opts) {
+      if (typeof opts.visible === "boolean") this.visible = opts.visible;
+      if (typeof opts.visibleWhenActive === "boolean") this.visibleWhenActive = opts.visibleWhenActive;
+      this.onOptionsChanged(opts);
+    }
+    this.syncVisibility();
+  }
+
+  protected configureRoot(_root: HTMLDivElement): void {}
+
+  protected onMount(_root: HTMLDivElement, _parent: HTMLElement): void {}
+
+  protected onUnmount(): void {}
+
+  protected onOptionsChanged(_opts: Record<string, unknown>): void {}
+
+  protected onHidden(): void {}
+
+  protected abstract onRender(state: State): void;
+
+  protected getDisplayMode(): string {
+    return "block";
+  }
+
+  protected getHostElement(): HTMLElement | undefined {
+    return this.hostEl;
+  }
+
+  protected getCanvas(): HTMLCanvasElement | undefined {
+    return this.binding?.getCanvas();
+  }
+
+  protected getViewType(): string | undefined {
+    return this.binding?.getViewType();
+  }
+
+  protected getLayerIds(): readonly string[] {
+    return this.binding?.getLayerIds() ?? [];
+  }
+
+  protected isViewActive(): boolean {
+    return this.binding?.isActive() ?? false;
+  }
+
+  /**
+   * Whether the overlay should currently render. The default honors the local
+   * `visible` and `visibleWhenActive` flags. Subclasses MAY override to derive
+   * visibility from `state` as well, but most overlays should treat visibility
+   * as view-local presentation and let the view's controller drive it via
+   * `setOptions({ visible })`.
+   */
+  protected isVisible(_state?: State): boolean {
+    return this.visible && (!this.visibleWhenActive || this.isViewActive());
+  }
+
+  protected createLabel(variant: OverlayLabelVariant, text = ""): HTMLDivElement {
+    const label = document.createElement("div");
+    label.textContent = text;
+    this.applyLabelStyle(label, variant);
+    return label;
+  }
+
+  protected positionRoot(position: OverlayCornerPosition, marginPx: number): void {
+    if (!this.root) return;
+    this.applyCornerPosition(this.root, position, marginPx);
+  }
+
+  protected applyCornerPosition(element: HTMLElement, position: OverlayCornerPosition, marginPx: number): void {
+    const margin = `${marginPx}px`;
+
+    element.style.left    = "";
+    element.style.right   = "";
+    element.style.top     = "";
+    element.style.bottom  = "";
+
+    switch (position) {
+      case "top-left":
+        element.style.left  = margin;
+        element.style.top   = margin;
+        break;
+      case "top-right":
+        element.style.right = margin;
+        element.style.top   = margin;
+        break;
+      case "bottom-left":
+        element.style.left    = margin;
+        element.style.bottom  = margin;
+        break;
+      case "bottom-right":
+        element.style.right   = margin;
+        element.style.bottom  = margin;
+        break;
+    }
+  }
+
+  protected applyLabelStyle(element: HTMLElement, variant: OverlayLabelVariant): void {
+    element.style.color       = "#fff";
+    element.style.fontFamily  = "ui-monospace, SFMono-Regular, Menlo, monospace";
+    element.style.fontSize    = "11px";
+    element.style.boxSizing   = "border-box";
+
+    switch (variant) {
+      case "panel":
+        element.style.background    = "rgba(10, 16, 28, 0.78)";
+        element.style.border        = "1px solid rgba(255, 255, 255, 0.12)";
+        element.style.padding       = "8px 10px";
+        element.style.borderRadius  = "6px";
+        element.style.fontWeight    = "500";
+        element.style.letterSpacing = "0.02em";
+        element.style.lineHeight    = "1.4";
+        element.style.whiteSpace    = "pre-line";
+        break;
+      case "tooltip":
+        element.style.background    = "rgba(0, 0, 0, 0.5)";
+        element.style.border        = "none";
+        element.style.padding       = "3px 8px";
+        element.style.borderRadius  = "3px";
+        element.style.fontWeight    = "400";
+        element.style.letterSpacing = "0.02em";
+        element.style.lineHeight    = "1.4";
+        element.style.whiteSpace    = "pre";
+        element.style.color         = "#ddd";
+        break;
+      default:
+        element.style.background    = "rgba(180, 40, 40, 0.7)";
+        element.style.border        = "none";
+        element.style.padding       = "3px 8px";
+        element.style.borderRadius  = "3px";
+        element.style.fontWeight    = "700";
+        element.style.letterSpacing = "0.5px";
+        element.style.lineHeight    = "1.2";
+        element.style.whiteSpace    = "nowrap";
+        break;
+    }
+  }
+
+  protected measureElement(element: HTMLElement): { width: number; height: number } {
+    const prevDisplay     = element.style.display;
+    const prevVisibility  = element.style.visibility;
+
+    element.style.visibility  = "hidden";
+    element.style.display     = "block";
+
+    const { width, height }   = element.getBoundingClientRect();
+
+    element.style.display     = prevDisplay;
+    element.style.visibility  = prevVisibility;
+
+    return { width, height };
+  }
+
+  protected clampToCanvas(
+    left    : number,
+    top     : number,
+    width   : number,
+    height  : number,
+    canvas  : HTMLCanvasElement,
+    margin  : number,
+  ): [number, number] {
+    const maxLeft = Math.max(margin, canvas.clientWidth - width - margin);
+    const maxTop  = Math.max(margin, canvas.clientHeight - height - margin);
+    return [
+      Math.min(Math.max(margin, left), maxLeft),
+      Math.min(Math.max(margin, top), maxTop),
+    ];
+  }
+
+  private syncVisibility(): void {
+    if (!this.root) return;
+    this.root.style.display = this.isVisible() ? this.getDisplayMode() : "none";
+  }
+}
