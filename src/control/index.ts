@@ -18,6 +18,3 @@ export {
   PanZoomControl,
   type PanZoomControlOptions
 } from "./panzoom";
-export {
-  ResolutionControl,
-} from "./resolution";

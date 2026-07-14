@@ -49,6 +49,10 @@ export const PITCH_EPSILON    = 0.01; // to avoid gimbal lock at poles
 export const DEPTH_FORMAT           = "depth24plus" as GPUTextureFormat;
 export const COLORMAP_TEXTURE_WIDTH = 256;
 export const MODE_TRANSITION_MS     = 240;
+/** Volume ray step in normalized viewport space. */
+export const VOLUME_STEP_SIZE = 0.008;
+/** Approximate samples across one viewport axis; caps useful 3D resolution. */
+export const VOLUME_RAY_SAMPLE_COUNT = Math.floor(1 / VOLUME_STEP_SIZE);
 
 // ============================================================================
 // INTERACTION CONSTANTS
@@ -74,13 +78,6 @@ export const DEFAULT_CAMERA_POSITION: Vec3 = [1.13, 0.12, 1.13];
 export const DEFAULT_CAMERA_TARGET  : Vec3 = [0.5, 0.5, 0.5];
 
 // ============================================================================
-// LOD DEFAULTS
-// ============================================================================
-
-export const DEFAULT_LOD_MODE   = "auto";
-export const DEFAULT_LOD_LEVEL  = 0;
-
-// ============================================================================
 // COMPOSED DEFAULTS
 // ============================================================================
 
@@ -91,10 +88,6 @@ export const DEFAULT_EXPLORATION: Exploration = {
     projMode  : DEFAULT_CAMERA_PROJ_MODE,
     position  : DEFAULT_CAMERA_POSITION,
     target    : DEFAULT_CAMERA_TARGET,
-  },
-  lod: {
-    mode  : DEFAULT_LOD_MODE,
-    level : DEFAULT_LOD_LEVEL,
   },
 };
 

@@ -79,6 +79,10 @@ export class SliceView extends BaseView {
     this.pipeline?.markDirty();
   }
 
+  override getCurrentLevel(layerId: string): number | undefined {
+    return this.pipeline?.getCurrentLevel(layerId);
+  }
+
   protected override onCanvasFormatChanged(): void {
     this.pipeline?.markDirty();
   }
@@ -97,6 +101,8 @@ export class SliceView extends BaseView {
     const dist           = cameraDistance(cam);
     const effectiveScale = sliceExtent / dist;
     const halfExtent     = sliceExtent / (2 * effectiveScale);
+    const aspect         = this.canvas.width / this.canvas.height;
+    const halfWidth      = halfExtent * aspect;
 
     const target2D: [number, number] = [cam.target[am[0]], cam.target[am[1]]];
     const camera: Scene = {
@@ -108,21 +114,36 @@ export class SliceView extends BaseView {
       far     : 1.0,
     };
 
-    // Update tiles in each layer's local 2D plane.
-    const lod = state.exploration.lod;
-    const planeTarget: Vec3 = [cam.target[am[0]], cam.target[am[1]], 0];
+    const viewportCorners: Vec3[] = [
+      [target2D[0] - halfWidth, target2D[1] - halfExtent, 0],
+      [target2D[0] + halfWidth, target2D[1] - halfExtent, 0],
+      [target2D[0] - halfWidth, target2D[1] + halfExtent, 0],
+      [target2D[0] + halfWidth, target2D[1] + halfExtent, 0],
+    ];
+    const worldUnitsPerPixel = (2 * halfExtent) / Math.max(1, this.canvas.height);
     this.pipeline.updateTiles(
       this.layerEntries,
-      effectiveScale,
       (layer) => {
-        const localTarget = this.transformPoint(layer.invModelMatrix, planeTarget);
-        return [localTarget[0], localTarget[1]];
+        const localCorners = viewportCorners.map((corner) => (
+          this.transformPoint(layer.invModelMatrix, corner)
+        ));
+        return {
+          bounds: {
+            min: [
+              Math.min(...localCorners.map((corner) => corner[0])),
+              Math.min(...localCorners.map((corner) => corner[1])),
+            ],
+            max: [
+              Math.max(...localCorners.map((corner) => corner[0])),
+              Math.max(...localCorners.map((corner) => corner[1])),
+            ],
+          },
+          worldUnitsPerPixel,
+        };
       },
-      { resolutionMode: lod.mode, resolutionLevel: lod.level },
     );
 
     // Camera + per-layer uniforms
-    const aspect     = this.canvas.width / this.canvas.height;
     const cameraData = this.createOrthographicUniforms(camera, aspect);
     this.device.queue.writeBuffer(this.cameraBuffer, 0, cameraData as unknown as ArrayBuffer);
     this.pipeline.writeFrameUniforms(this.layerEntries);
@@ -145,7 +166,4 @@ export class SliceView extends BaseView {
     this.pipeline?.destroy();
   }
 
-  protected override clampState(state: State): State {
-    return this.clampLodLevel(state);
-  }
 }

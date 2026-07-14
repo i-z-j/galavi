@@ -15,15 +15,12 @@ import type {
   LayerConfig,
   Exploration,
   Camera,
-  Lod,
   Render,
   Data,
 } from "./types";
 import {
   DEFAULT_CAMERA_NAV_MODE,
   DEFAULT_CAMERA_PROJ_MODE,
-  DEFAULT_LOD_MODE,
-  DEFAULT_LOD_LEVEL,
   DEFAULT_EXPLORATION,
   DEFAULT_STATE,
 } from "./defaults";
@@ -49,6 +46,7 @@ type LayerAccessor = {
 type ViewAccessor = {
   setOverlayOptions(overlayType: string, opts: Record<string, unknown>): void;
   getLayer(id: ID): BaseLayer | undefined;
+  getCurrentLevel(layerId: ID): number | undefined;
   readonly config: ViewConfig;
   readonly base: BaseView;
 };
@@ -129,7 +127,7 @@ export class Galavi {
   /** Get the full state snapshot (mutable clone — safe for controls to mutate). */
   getState(): State {
     return {
-      physical    : this._physical,
+      physical    : normalizePhysicalSpace(this._physical),
       layers      : this._layers.map(l => ({
         ...l,
         render  : l.render  ? { ...l.render }  : undefined,
@@ -144,7 +142,6 @@ export class Galavi {
           target   : [...this._exploration.camera.target] as Vec3,
           ...(this._exploration.camera.up ? { up: [...this._exploration.camera.up] as Vec3 } : {}),
         },
-        lod: { ...this._exploration.lod },
         ...(this._exploration.temporal ? { temporal: { ...this._exploration.temporal } } : {}),
       },
     };
@@ -184,11 +181,6 @@ export class Galavi {
   /** Cloned copy of the current camera target position. */
   get target(): Vec3 {
     return [...this._exploration.camera.target] as Vec3;
-  }
-
-  /** Current LOD state (read-only by convention). */
-  get lod(): Lod {
-    return this._exploration.lod;
   }
 
   /** Get a layer handle by ID, or undefined if not found. */
@@ -278,32 +270,6 @@ export class Galavi {
     this._commit(state);
   }
 
-  /** Set LOD resolution mode. */
-  setLodMode(mode: "auto" | "manual"): void {
-    if (this._exploration.lod.mode === mode) return;
-    const state = this.getState();
-    state.exploration.lod.mode = mode;
-    this._commit(state);
-  }
-
-  /** Set LOD resolution level (also switches to manual mode). */
-  setLodLevel(level: number): void {
-    const next = Math.max(0, Math.round(level));
-    if (this._exploration.lod.mode === "manual" && this._exploration.lod.level === next) return;
-    const state = this.getState();
-    state.exploration.lod.mode = "manual";
-    state.exploration.lod.level = next;
-    this._commit(state);
-  }
-
-  /** Step LOD level by delta (also switches to manual mode). */
-  stepLod(delta: number): void {
-    const state = this.getState();
-    state.exploration.lod.mode = "manual";
-    state.exploration.lod.level = Math.max(0, Math.round(state.exploration.lod.level + delta));
-    this._commit(state);
-  }
-
   private _commit(next: State): void {
     // Normalize
     const norm = normalizeState(next);
@@ -345,6 +311,7 @@ export class Galavi {
         this.requestRender();
       },
       getLayer: (id: ID) => vr.layers.get(id),
+      getCurrentLevel: (layerId: ID) => vr.view.getCurrentLevel(layerId),
       get config() {
         return vr.config;
       },
@@ -458,13 +425,6 @@ function normalizeExploration(exploration: Exploration): Exploration {
       target    : [...cam.target] as Vec3,
       up        : cam.up ? ([...cam.up] as Vec3) : undefined,
     },
-    lod: {
-      mode  : exploration.lod?.mode ?? DEFAULT_LOD_MODE,
-      level : Math.max(
-        0,
-        Math.round(exploration.lod?.level ?? DEFAULT_LOD_LEVEL),
-      ),
-    },
     temporal: exploration.temporal ? { ...exploration.temporal } : undefined,
   };
 }
@@ -483,12 +443,15 @@ function normalizePhysicalSpace(physical?: PhysicalSpace): PhysicalSpace | undef
     ...physical,
     spatial: {
       ...physical.spatial,
-      size: [...physical.spatial.size] as Vec3,
+      size      : [...physical.spatial.size] as Vec3,
+      spacing   : physical.spatial.spacing ? [...physical.spatial.spacing] as Vec3 : undefined,
+      origin    : physical.spatial.origin ? [...physical.spatial.origin] as Vec3 : undefined,
+      transform : physical.spatial.transform ? [...physical.spatial.transform] : undefined,
     },
   };
 }
 
-/** Normalize full state — camera constraints, LOD rounding, layer defaults, deep-copy physical. */
+/** Normalize full state — camera constraints, layer defaults, deep-copy physical. */
 export function normalizeState(state: State): State {
   return {
     exploration : normalizeExploration(state.exploration),
@@ -507,10 +470,6 @@ export function normalizeInitialState(state: State): State {
       camera: {
         ...DEFAULT_EXPLORATION.camera,
         ...state.exploration.camera,
-      },
-      lod: {
-        ...DEFAULT_EXPLORATION.lod,
-        ...state.exploration.lod,
       },
     },
   });

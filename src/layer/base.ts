@@ -1,11 +1,8 @@
 /**
  * Layer Base Module
  *
- * BaseLayer — abstract base for all layer types.
- * Also defines rendering types (Geometry, Shader, LayerParams, VertexAttribute)
- * that are used by layer implementations and views.
+ * BaseLayer — pure-data layer abstraction used by view-owned renderers.
  */
-
 import { mat4 } from "wgpu-matrix";
 import type {
   PhysicalSpace,
@@ -15,7 +12,7 @@ import type {
   State,
   Vec3,
 } from "../types";
-import type { TileSpec, TileFramePlan } from "../utils";
+import type { TileSpec, TileFramePlan, TileViewport } from "../utils";
 
 /** Transform descriptor for model matrix construction */
 interface Transform {
@@ -250,9 +247,6 @@ export abstract class BaseLayer {
 
   // === Tile / data lifecycle (override in tileable layers) ===
 
-  /** Pyramid level range [min, max] for tiled layers (undefined for non-tiled). */
-  readonly levelRange?: [number, number];
-
   /**
    * Monotonic "data identity" version. Bumped by tiled layers when the
    * underlying source / selection / slice index changes so the view-side
@@ -287,16 +281,12 @@ export abstract class BaseLayer {
   }
 
   /**
-   * Per-frame tile request. Returns the desired `TilePlan` (one tile per grid
-   * cell), the `TileLoader` to resolve each tile to bytes/region, and an
-   * optional in-bounds filter. Returns `null` when nothing should be loaded
-   * this frame (e.g. no source). The layer is also expected to update any
-   * internal state used by params (e.g. viewport) here.
+    * Per-frame tile request. Returns the visible `TilePlan` and `TileLoader`, or
+    * `null` when nothing should be loaded (e.g. no source). The layer also
+    * updates internal render params such as viewport and dynamic grid metadata.
    */
   planTiles(
-    _target         : number[],
-    _effectiveScale : number,
-    _options?       : unknown,
+    _viewport: TileViewport,
   ): TileFramePlan | null {
     return null;
   }
@@ -388,12 +378,15 @@ export abstract class BaseLayer {
     }
   }
 
-  /** Model transform: explicit affine from data.transform, else physical.spatial.size. */
+  /** Model transform: explicit affine, else physical-space scale and origin. */
   protected applyTransformConfig(desc: LayerConfig, physical?: PhysicalSpace): void {
     if (desc.data?.transform !== undefined) {
       this.setTransform({ affine: desc.data.transform });
     } else if (physical?.spatial) {
-      this.setTransform({ scale: physical.spatial.size });
+      this.setTransform({
+        scale    : physical.spatial.size,
+        translate: physical.spatial.origin,
+      });
     }
   }
 

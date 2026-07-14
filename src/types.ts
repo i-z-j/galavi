@@ -59,7 +59,7 @@ export interface ViewConfig {
   canvas?       : HTMLCanvasElement;
   /** Layers (IDs) to render in this view (must match IDs in state.layers) */
   layers        : ID[];
-  /** Controls to attach, keyed by control type (e.g. { orbit: {}, fly: {}, resolution: {} }) */
+  /** Controls to attach, keyed by control type (e.g. { orbit: {}, fly: {} }) */
   controls?     : Record<string, Record<string, unknown>>;
   /** Overlays to attach, keyed by overlay type (e.g. { scalebar: {}, marker: { visible: false } }) */
   overlays?     : Record<string, Record<string, unknown>>;
@@ -109,8 +109,6 @@ export interface LayerConfig {
 export interface Exploration {
   /** Camera position and orientation */
   camera    : Camera;
-  /** Level-of-detail / multi-resolution state */
-  lod       : Lod;
   /** Temporal navigation (omit if no time dimension) */
   temporal? : Temporal;
 }
@@ -125,7 +123,7 @@ export interface SpatialConfig {
   size        : Vec3;
   /** Physical unit (default 'µm') */
   unit?       : PhysicalUnit | (string & {});
-  /** Voxel size [x,y,z] in physical units (for LOD, scalebar) */
+  /** Voxel size [x,y,z] in physical units (for resolution selection, scalebar) */
   spacing?    : Vec3;
   /** Physical coordinate of voxel [0,0,0] (default [0,0,0]) */
   origin?     : Vec3;
@@ -157,10 +155,39 @@ export interface ChannelConfig {
 // LAYER
 // ============================================================================
 
+/**
+ * One multiscale image level, normalized by an adapter into XYZ axis order.
+ * Levels are ordered from finest to coarsest in {@link ImagePyramid.levels}.
+ */
+export interface ImagePyramidLevel {
+  /** Format-specific source path for diagnostics and custom fetchers. */
+  path      : string;
+  /** Level dimensions in voxels [x,y,z]. Use z=1 for 2D data. */
+  shape     : Vec3;
+  /** Storage chunk dimensions [x,y,z]. One rendered tile equals one chunk. */
+  chunkSize : Vec3;
+  /** Physical units per voxel [x,y,z], in PhysicalSpace.spatial.unit. */
+  scale     : Vec3;
+}
+
+/**
+ * Format-neutral multiscale image metadata consumed by Galavi rendering.
+ *
+ * Adapters for OME-Zarr, OME-TIFF, and future formats normalize their native
+ * metadata into this interface; format parsing does not belong in Galavi.
+ */
+export interface ImagePyramid {
+  levels: ImagePyramidLevel[];
+}
+
+// TODO: Implement OME-TIFF normalization in a separate adapter package that returns ImagePyramid.
+
 /** Data configuration */
 export interface Data {
   /** Source URL or path */
   url?: string;
+  /** Normalized multiscale image metadata for tiled raster layers. */
+  pyramid?: ImagePyramid;
   /**
    * URL template for tile/surface fetching.
    *
@@ -219,14 +246,6 @@ export interface Camera {
   target    : Vec3;
   /** Up direction vector, default [0,1,0] */
   up?       : Vec3;
-}
-
-/** Level-of-detail state for multi-resolution sources */
-export interface Lod {
-  /** Resolution selection mode */
-  mode  : 'auto' | 'manual';
-  /** Pyramid level (0 = full resolution) */
-  level : number;
 }
 
 /** Temporal navigation state */

@@ -4,27 +4,25 @@
  * Renders volumetric data with cube geometry and 3D texture sampling.
  * Supports tile-based loading for large datasets.
  *
- * Strategy (mirrors 2D SliceLayer):
- * - Always use 3x3x3 = 27 tiles to cover viewport cube [0,1]³
- * - Higher resolution = smaller portion of volume visible
- * - Tiles map to viewport grid cells, not world positions
- * - Ray marching scoped to [0,1]³ viewport cube
+ * The view supplies camera-derived local bounds; the layer selects a physical
+ * best-fit pyramid level and requests every intersecting storage chunk.
  */
 
 import type {
   Data,
+  ImagePyramid,
   LayerConfig,
   Vec3,
 } from "../../types";
 import {
   UNIT_CUBE,
   buildTileFetcher,
-  getPyramidLevelScale,
+  pickPyramidLevel,
   planTiles,
-  resolvePyramidLevel,
   sourceChanged,
   type TileFramePlan,
   type TileSpec,
+  type TileViewport,
 } from "../../utils";
 import {
   BaseLayer,
@@ -32,41 +30,20 @@ import {
   type Geometry,
   type LayerParams,
 } from "../base";
+import { VOLUME_STEP_SIZE } from "../../defaults";
 import shaderCode from "./shader.wgsl?raw";
 
 // === Volume Parameters ===
 
-// Must match shader step multiplier (see volume/shader.wgsl)
-// Step size is in viewport space (0..1)
-const VOLUME_STEP_SIZE = 0.008;
-
 export interface VolumeConfig {
   /** Data source descriptor */
   source?        : Data;
-  /** Volume size [x, y, z] in voxels at full resolution */
-  dataSize?      : Vec3;
-  /** Per-level voxel scaling relative to level 0, indexed by level. */
-  levelScales?   : Vec3[];
-  /**
-   * Physical scale at level 0 (physical units per voxel, e.g. μm/voxel).
-    * Used by scalebar and other overlays for physical-unit display.
-   */
-  scale?         : number;
-  /** Pyramid level range [min, max] */
-  levelRange?    : [number, number];
   /** Contrast range [min, max] */
   contrastRange? : [number, number];
-  /** Tile size in voxels [x, y, z] (default: 64³) */
-  tileSize?      : Vec3;
-  /** Maximum pool size (default: Infinity) */
+  /** Optional tile-atlas slot cap (default: derived from a 128 MiB budget) */
   maxPoolSize?   : number;
   /** Non-spatial dimension selection, e.g. { c: 0, t: 5 }. Substituted into urlTemplate or passed to source.fetch. */
   selection?     : Record<string, number>;
-}
-
-export interface VolumeTileUpdateOptions {
-  resolutionMode?  : 'auto' | 'manual';
-  resolutionLevel? : number;
 }
 
 export class VolumeLayerParams implements LayerParams {
@@ -75,6 +52,9 @@ export class VolumeLayerParams implements LayerParams {
   private viewportOrigin : Vec3 = [0, 0, 0];
   private viewportSize   : Vec3 = [1, 1, 1];
   private cameraPosition : Vec3 = [0, 0, 0];
+  private gridOrigin     : Vec3 = [0, 0, 0];
+  private tileNormSize   : Vec3 = [1, 1, 1];
+  private gridShape      : Vec3 = [1, 1, 1];
 
   constructor(config: VolumeConfig = {}) {
     if (config.contrastRange) this.contrast = config.contrastRange;
@@ -97,10 +77,17 @@ export class VolumeLayerParams implements LayerParams {
     this.cameraPosition = pos;
   }
 
+  setTileGrid(origin: Vec3, tileSize: Vec3, shape: Vec3): void {
+    this.gridOrigin = origin;
+    this.tileNormSize = tileSize;
+    this.gridShape = shape;
+  }
+
   // Layout: contrast(2), step(1), opacity(1), viewport_origin(3), _pad,
   // viewport_size(3), _pad, viewport_inv_size(3), _pad,
-  // ray_origin_view(3), _pad = 20 floats
-  private readonly _buffer = new Float32Array(20);
+  // ray_origin_view(3), _pad, grid_origin(3), _pad,
+  // tile_norm_size(3), _pad, grid_shape(3), _pad = 32 floats
+  private readonly _buffer = new Float32Array(32);
   toBuffer(): Float32Array {
     const range     = this.contrast[1] - this.contrast[0];
     const scale     = range > 0 ? 1.0 / range : 1.0;
@@ -118,6 +105,9 @@ export class VolumeLayerParams implements LayerParams {
     b[17] = (this.cameraPosition[1] - this.viewportOrigin[1]) * invY;
     b[18] = (this.cameraPosition[2] - this.viewportOrigin[2]) * invZ;
     b[19] = 0;
+    b[20] = this.gridOrigin[0];   b[21] = this.gridOrigin[1];   b[22] = this.gridOrigin[2];   b[23] = 0;
+    b[24] = this.tileNormSize[0]; b[25] = this.tileNormSize[1]; b[26] = this.tileNormSize[2]; b[27] = 0;
+    b[28] = this.gridShape[0];    b[29] = this.gridShape[1];    b[30] = this.gridShape[2];    b[31] = 0;
     return b;
   }
 }
@@ -129,6 +119,8 @@ interface VolumeTile {
   voxelPos  : number[];
   id        : string;
   level     : number;
+  chunkSize : Vec3;
+  region    : { start: Vec3; size: Vec3 };
 }
 
 export class VolumeLayer extends BaseLayer {
@@ -137,13 +129,8 @@ export class VolumeLayer extends BaseLayer {
     const opts = desc.options ?? {};
     return new VolumeLayer(id, {
       source        : desc.data,
-      dataSize      : (opts.dataSize as Vec3) ?? undefined,
-      levelScales   : (opts.levelScales as Vec3[]) ?? undefined,
-      levelRange    : (opts.levelRange as [number, number]) ?? undefined,
       contrastRange : (opts.contrastRange as [number, number]) ?? undefined,
-      scale         : opts.scale as number | undefined,
       selection     : opts.selection as Record<string, number> | undefined,
-      tileSize      : (opts.tileSize as Vec3) ?? undefined,
       maxPoolSize   : opts.maxPoolSize as number | undefined,
     });
   }
@@ -152,10 +139,6 @@ export class VolumeLayer extends BaseLayer {
   private params : VolumeLayerParams;
 
   private source?               : Data;
-  readonly dataSize             : Vec3;
-  override readonly levelRange  : [number, number];
-  readonly levelScales?         : Vec3[];
-  readonly tileSize             : Vec3;
   private maxPoolSize?          : number;
   private selection             : Record<string, number>;
 
@@ -174,27 +157,18 @@ export class VolumeLayer extends BaseLayer {
     super(id);
     this.params = new VolumeLayerParams(config);
     this.source = config?.source;
-    this.dataSize = config?.dataSize ?? [1, 1, 1];
-    this.levelRange = config?.levelRange ?? [0, 6];
-    this.levelScales = config?.levelScales;
-    this.tileSize = config?.tileSize ?? [64, 64, 64];
     this.maxPoolSize = config?.maxPoolSize;
     this.selection = config?.selection ? { ...config.selection } : {};
-    // G4: initialize to a valid pyramid level so any pre-update sentinel reads
-    // never inject -1 / NaN into URL templates.
-    this.currentLevel = this.levelRange[0];
-  }
-
-  private getLevelScale(level: number): Vec3 {
-    return getPyramidLevelScale(level, this.levelScales);
+    this.currentLevel = Math.max(0, (this.source?.pyramid?.levels.length ?? 1) - 1);
   }
 
   /** Tile residency descriptor — view-side LayerRenderer allocates the pool. */
   override getTileSpec(): TileSpec | null {
-    if (!this.source) return null;
+    const pyramid = this.source?.pyramid;
+    if (!pyramid?.levels.length) return null;
     return {
-      tileSize      : this.tileSize,
-      gridCells     : 27,
+      slotSize      : maxChunkSize(pyramid),
+      initialLevel  : pyramid.levels.length - 1,
       format        : "r16float",
       bytesPerTexel : 2,
       label         : `VolumeLayer[${this.id}]`,
@@ -203,60 +177,54 @@ export class VolumeLayer extends BaseLayer {
   }
 
   /**
-   * Plan this frame's 3×3×3 tile grid. Pure-ish: updates `currentLevel` and the
-   * viewport that the layer params reference, but does not touch the GPU.
-   *
-   * Strategy:
-   * - effectiveScale determines resolution level
-   * - 3x3x3 tiles always cover viewport [0,1]³
-   * - Target determines which portion of volume is visible
-   * - Viewport is offset/scaled so target stays at center
+   * Plan the storage chunks intersecting this frame's camera-derived local
+   * bounds. The renderer may force the coarsest level for the initial frame;
+   * subsequent calls select automatically from physical scale and canvas size.
    */
   override planTiles(
-    target          : Vec3,
-    effectiveScale  : number,
-    options         : VolumeTileUpdateOptions = {},
+    viewport: TileViewport,
   ): TileFramePlan<VolumeTile> | null {
-    if (!this.source) return null;
+    const source  = this.source;
+    const pyramid = source?.pyramid;
+    if (!source || !pyramid?.levels.length) return null;
 
-    // effectiveScale > 1 = zoomed in = finer level (lower level number)
-    // When per-level scales are provided, select the coarsest level whose
-    // sampling density still satisfies the requested scale.
-    const level = resolvePyramidLevel(effectiveScale, this.levelRange, {
-      resolutionMode  : options.resolutionMode,
-      resolutionLevel : options.resolutionLevel,
-      levelScales     : this.levelScales,
-      fallbackLevel   : this.currentLevel,
+    const level = viewport.level ?? pickPyramidLevel(pyramid, {
+      worldUnitsPerPixel: viewport.worldUnitsPerPixel,
+      axes              : [0, 1, 2],
+      bounds            : viewport.bounds,
+      tileBudget        : viewport.tileBudget,
     });
     this.currentLevel = level;
-
-    // Volume size at this level (in voxels)
-    const resScale = this.getLevelScale(level);
-    const resSize: Vec3 = [
-      this.dataSize[0] / resScale[0],
-      this.dataSize[1] / resScale[1],
-      this.dataSize[2] / resScale[2],
-    ];
+    const levelInfo = pyramid.levels[level];
 
     const plan = planTiles<VolumeTile>({
-      target,
-      tileSize : this.tileSize,
-      resSize,
+      bounds    : viewport.bounds,
+      chunkSize : levelInfo.chunkSize,
+      resSize   : levelInfo.shape,
       gridDim  : 3,
       level,
-      makeTile : (gridIdx, voxelPos, lvl) => ({
+      makeTile : (gridIdx, voxelPos, lvl, region) => ({
         gridIdx,
         voxelPos,
         level : lvl,
         id    : `${lvl}:${voxelPos.join(",")}`,
+        chunkSize: [...levelInfo.chunkSize] as Vec3,
+        region: {
+          start: [...region.start] as Vec3,
+          size : [...region.size] as Vec3,
+        },
       }),
     });
 
     this.viewportOrigin = plan.viewportOrigin as Vec3;
     this.viewportSize   = plan.viewportSize as Vec3;
     this.params.setViewport(this.viewportOrigin, this.viewportSize);
+    this.params.setTileGrid(
+      plan.gridOrigin.map((value, axis) => value * plan.tileNormSize[axis]) as Vec3,
+      plan.tileNormSize as Vec3,
+      plan.gridShape as Vec3,
+    );
 
-    const source    = this.source;
     const selection = this.selection;
     return {
       plan,
@@ -265,15 +233,6 @@ export class VolumeLayer extends BaseLayer {
           level    : req.level,
           position : req.voxelPos,
         }),
-        region: (req) => {
-          const gx = req.gridIdx % 3;
-          const gy = Math.floor(req.gridIdx / 3) % 3;
-          const gz = Math.floor(req.gridIdx / 9);
-          return {
-            start: [gx / 3, gy / 3, gz / 3],
-            scale: [3.0, 3.0, 3.0],
-          };
-        },
       },
     };
   }
@@ -316,4 +275,12 @@ export class VolumeLayer extends BaseLayer {
   override getWorldAABB(): { min: Vec3; max: Vec3 } {
     return transformAABB([0, 0, 0], [1, 1, 1], this.modelMatrix);
   }
+}
+
+function maxChunkSize(pyramid: ImagePyramid): Vec3 {
+  return pyramid.levels.reduce<Vec3>((max, level) => [
+    Math.max(max[0], level.chunkSize[0]),
+    Math.max(max[1], level.chunkSize[1]),
+    Math.max(max[2], level.chunkSize[2]),
+  ], [1, 1, 1]);
 }

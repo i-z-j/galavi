@@ -315,6 +315,11 @@ export abstract class BaseView {
     return this.layerEntries;
   }
 
+  /** View-local pyramid level selected for a tiled layer, if available. */
+  getCurrentLevel(_layerId: ID): number | undefined {
+    return undefined;
+  }
+
   // === Overlay management ===
 
   addOverlay(overlay: BaseOverlay): void {
@@ -478,46 +483,9 @@ export abstract class BaseView {
     }
   }
 
-  /**
-   * Post-control hook for views to clamp state (e.g. LOD safety caps).
-   *
-   * The view-level LOD clamp is the canonical second tier of the three-tier LOD
-   * design: control expresses semantic intent, view caps to
-   * canvas / pyramid bounds, layer applies a final per-data backstop. Concrete
-   * views typically delegate to `clampLodLevel`.
-   */
+  /** Post-control hook for view-specific state constraints. */
   protected clampState(state: State): State {
     return state;
-  }
-
-  /**
-   * Canonical view-tier LOD clamp — narrows a manual LOD level to the
-   * intersection of every layer's pyramid range. Returns the same state
-   * reference unmodified when no clamp is needed (mode != manual, no tiled
-   * layers, or value already in range), preserving `forward()`'s reference
-   * equality short-circuit.
-   */
-  protected clampLodLevel(state: State): State {
-    if (state.exploration.lod.mode !== "manual") return state;
-    let finest    = 0;
-    let coarsest  = Infinity;
-    for (const layer of this.layerEntries) {
-      if (layer.levelRange) {
-        finest    = Math.max(finest, layer.levelRange[0]);
-        coarsest  = Math.min(coarsest, layer.levelRange[1]);
-      }
-    }
-    if (coarsest === Infinity) return state;
-    const current = state.exploration.lod.level;
-    const clamped = Math.max(finest, Math.min(coarsest, current));
-    if (clamped === current) return state;
-    return {
-      ...state,
-      exploration: {
-        ...state.exploration,
-        lod: { ...state.exploration.lod, level: clamped },
-      },
-    };
   }
 
   /** Bind this view to its owning Galavi instance (used for `requestRender`). */

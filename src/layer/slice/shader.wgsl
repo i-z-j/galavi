@@ -24,6 +24,10 @@ struct Params {
   _pad0           : f32,
   viewport_origin : vec2f,  // Where viewport [0,1]² starts in world space
   viewport_size   : vec2f,  // Size of viewport region in world space
+  grid_origin     : vec2f,  // First visible chunk origin in normalized data space
+  tile_norm_size  : vec2f,  // Nominal storage-chunk size in normalized data space
+  grid_shape      : vec2f,  // Visible chunk count per axis
+  _pad1           : vec2f,
 };
 
 // === Tile Region (unified 3D) ===
@@ -56,8 +60,7 @@ struct TileRegion {
 
 // === Vertex I/O ===
 struct VertexInput {
-  @location(0) model_pos : vec2f,              // Unit square [0,1]²
-  @builtin(instance_index) instance_id : u32,  // Grid cell index (0..8)
+  @location(0) model_pos : vec2f,  // Unit square [0,1]²
 };
 
 struct VertexOutput {
@@ -94,25 +97,27 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4f {
     discard;
   }
 
-  // Determine which 3×3 grid cell this fragment belongs to
-  let cell = clamp(vec2i(floor(vp * 3.0)), vec2i(0), vec2i(2));
-  let grid_idx = u32(cell.y * 3 + cell.x);
+  let data_pos = params.viewport_origin + vp * params.viewport_size;
+  let cell = vec2i(floor((data_pos - params.grid_origin) / params.tile_norm_size));
+  let grid_shape = vec2i(params.grid_shape);
+  if (any(cell < vec2i(0)) || any(cell >= grid_shape)) {
+    discard;
+  }
+  let grid_idx = u32(cell.y * grid_shape.x + cell.x);
 
-  // Select tile slot (current if ready, else fallback to previous)
+  // Select tile slot (current if ready, else spatially covering coarse fallback)
   let indices = idx_li[grid_idx];
-  let slot = select(indices.y, indices.x, ready_li[indices.x] == 1u);
+  var slot = indices.y;
+  if (indices.x != 0u && ready_li[indices.x] == 1u) {
+    slot = indices.x;
+  }
 
-  if (ready_li[slot] == 0u) {
+  if (slot == 0u || ready_li[slot] == 0u) {
     discard;
   }
 
   let region = regions[slot];
-
-  // Compute tile-local UV from grid cell position (not from region start/scale/bias).
-  // This avoids drift when tiles are reused across bucket changes:
-  // each grid cell maps its [cell/3, (cell+1)/3] viewport range to [0,1].
-  let cell_origin = vec2f(f32(cell.x), f32(cell.y)) / 3.0;
-  let local_xy = (vp - cell_origin) * 3.0;
+  let local_xy = data_pos * region.scale.xy + region.bias.xy;
 
   if (local_xy.x < 0.0 || local_xy.x > 1.0 || local_xy.y < 0.0 || local_xy.y > 1.0) {
     discard;

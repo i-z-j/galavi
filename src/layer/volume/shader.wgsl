@@ -2,11 +2,9 @@
 // Volume Shader
 // ============================================================================
 // Renders 3D volumetric data using raycast through viewport cube [0,1]³.
-// Single-pass rendering with 3x3x3 tile grid covering viewport.
+// Visible storage chunks are indexed through a dynamic per-frame grid.
 //
 // Strategy:
-// - 27 tiles always cover viewport [0,1]³
-// - Each tile covers 1/3 of viewport in each dimension
 // - Ray marching scoped to [0,1]³, MIP accumulation
 //
 // Bind Group Layout:
@@ -34,15 +32,21 @@ struct Params {
   _pad3              : f32,
   ray_origin_view    : vec3f,  // Camera eye in viewport space
   _pad4              : f32,
+  grid_origin        : vec3f,  // First visible chunk origin in normalized data space
+  _pad5              : f32,
+  tile_norm_size     : vec3f,  // Nominal storage-chunk size in normalized data space
+  _pad6              : f32,
+  grid_shape         : vec3f,  // Visible chunk count per axis
+  _pad7              : f32,
 };
 
 // === Tile Region ===
 // Maps viewport position to tile-local UV:
 //   local_uv = (viewport_pos - start) * scale
 struct TileRegion {
-  start     : vec3f,  // Viewport origin of this tile (e.g., 0, 1/3, 2/3)
+  start     : vec3f,  // Absolute normalized data origin of this tile
   _pad0     : f32,
-  scale     : vec3f,  // Scale factor (3.0 for 3x3x3 grid)
+  scale     : vec3f,  // Inverse normalized tile size
   _pad1     : f32,
   bias      : vec3f,  // Precomputed = -start * scale
   _pad2     : f32,
@@ -108,13 +112,20 @@ fn sample_at(viewport_pos: vec3f) -> f32 {
     return -1.0;  // Outside viewport, no data
   }
 
-  // Determine which grid cell this position belongs to
-  let cell = clamp(vec3i(floor(viewport_pos * 3.0)), vec3i(0), vec3i(2));
-  let grid_idx = u32(cell.z * 9 + cell.y * 3 + cell.x);
+  let data_pos = params.viewport_origin + viewport_pos * params.viewport_size;
+  let cell = vec3i(floor((data_pos - params.grid_origin) / params.tile_norm_size));
+  let grid_shape = vec3i(params.grid_shape);
+  if (any(cell < vec3i(0)) || any(cell >= grid_shape)) {
+    return -1.0;
+  }
+  let grid_idx = u32(cell.z * grid_shape.x * grid_shape.y + cell.y * grid_shape.x + cell.x);
 
-  // Get tile slot (current, with fallback to previous)
+  // Get tile slot (current, with a spatially covering coarse fallback)
   let indices = idx_li[grid_idx];
-  let slot = select(indices.y, indices.x, ready_li[indices.x] == 1u);
+  var slot = indices.y;
+  if (indices.x != 0u && ready_li[indices.x] == 1u) {
+    slot = indices.x;
+  }
 
   // Skip if no tile ready (slot 0 is placeholder)
   if (ready_li[slot] == 0u || slot == 0u) {
@@ -124,7 +135,7 @@ fn sample_at(viewport_pos: vec3f) -> f32 {
   let region = regions[slot];
 
   // Convert viewport position to tile-local UV [0,1]³
-  let local_uv = viewport_pos * region.scale + region.bias;
+  let local_uv = data_pos * region.scale + region.bias;
 
   // Discard samples outside tile's valid UV range (prevents edge clamping artifacts)
   if (any(local_uv < vec3f(0.0)) || any(local_uv > vec3f(1.0))) {

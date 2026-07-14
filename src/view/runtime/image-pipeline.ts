@@ -11,7 +11,12 @@
  */
 
 import type { Render } from "../../types";
-import { getColormapLUT, TileManager, type TilePlacement } from "../../utils";
+import {
+  getColormapLUT,
+  TileManager,
+  type TilePlacement,
+  type TileViewport,
+} from "../../utils";
 import { COLORMAP_TEXTURE_WIDTH, DEPTH_FORMAT } from "../../defaults";
 import {
   BaseLayer,
@@ -44,9 +49,11 @@ interface LayerRenderer {
   colormapTexture?   : GPUTexture;
   /** Tile residency for tiled image layers; absent for non-tiled layers. */
   tileManager?       : TileManager<TilePlacement>;
-  /** Pyramid level last seen during `updateTiles`; used to invalidate the
-   *  prev-slot mapping when the layer flips levels. */
-  lastTileLevel?     : number;
+  /** Coarsest level shown before automatic best-fit streaming starts. */
+  initialTileLevel?  : number;
+  /** Pyramid level selected by this view for the current frame. */
+  currentTileLevel?  : number;
+  showingInitialTiles: boolean;
   /** Layer.dataVersion at last sync — drop tile residency when it bumps. */
   lastDataVersion    : number;
   layer              : BaseLayer;
@@ -152,34 +159,42 @@ export class ImagePipeline {
 
   /**
    * Drive every renderer's tile residency for this frame. For each layer,
-   * computes its target/effectiveScale-aware `TileFramePlan` and commits it
+    * computes its camera/canvas-aware `TileFramePlan` and commits it
    * to the renderer's `TileManager`. Non-tiled layers are no-ops.
    *
-   * `localTarget(layer)` returns the per-layer target in that layer's local
-   * space (typically `transformPoint(layer.invModelMatrix, worldTarget)`);
-   * the pipeline does not assume a coordinate system.
+    * `getViewport(layer)` returns normalized local bounds plus physical display
+    * density; the pipeline adds renderer-owned cache and coarse-first inputs.
    */
   updateTiles(
-    layers          : readonly BaseLayer[],
-    effectiveScale  : number,
-    localTarget     : (layer: BaseLayer) => number[],
-    options?        : unknown,
+    layers      : readonly BaseLayer[],
+    getViewport : (layer: BaseLayer) => Omit<TileViewport, "tileBudget" | "level">,
   ): void {
     for (const layer of layers) {
       const ds = this.states.get(layer.id);
       if (!ds || !ds.tileManager) continue;
-      const target = localTarget(layer);
-      const frame  = layer.planTiles(target, effectiveScale, options);
-      if (!frame) continue;
-      // Layer flipped pyramid level — drop the prev-slot mapping so stale
-      // slots from the previous level aren't bound on the next draw.
-      const planLevel = frame.plan.tiles[0]?.level;
-      if (planLevel !== undefined && ds.lastTileLevel !== planLevel) {
-        ds.tileManager.invalidatePrev();
-        ds.lastTileLevel = planLevel;
+      const pool = ds.tileManager.pool;
+      if (!pool) continue;
+
+      if (ds.showingInitialTiles && ds.tileManager.hasVisibleTile()) {
+        ds.showingInitialTiles = false;
       }
-      ds.tileManager.commit(frame.plan, frame.loader, { inBounds: frame.inBounds });
+      const viewport: TileViewport = {
+        ...getViewport(layer),
+        tileBudget: pool.capacity - 1,
+        ...(ds.showingInitialTiles && ds.initialTileLevel !== undefined
+          ? { level: ds.initialTileLevel }
+          : {}),
+      };
+      const frame = layer.planTiles(viewport);
+      if (!frame) continue;
+      ds.currentTileLevel = frame.plan.tiles[0]?.level ?? layer.getCurrentLevel();
+      ds.tileManager.commit(frame.plan, frame.loader);
     }
+  }
+
+  /** Pyramid level selected for one layer in this view's latest frame. */
+  getCurrentLevel(layerId: string): number | undefined {
+    return this.states.get(layerId)?.currentTileLevel;
   }
 
   /**
@@ -217,15 +232,14 @@ export class ImagePipeline {
       pass.setVertexBuffer(0, ds.vertexBuffer);
 
       const geom     = layer.getGeometry();
-      const tilePool = ds.tileManager?.pool;
-      if (rewriteNonTiledVerts && !tilePool) {
+      if (rewriteNonTiledVerts && !ds.tileManager?.pool) {
         device.queue.writeBuffer(
           ds.vertexBuffer,
           0,
           geom.vertices as unknown as ArrayBuffer,
         );
       }
-      const instanceCount = geom.instanceCount ?? (tilePool ? tilePool.gridSize : 1);
+      const instanceCount = geom.instanceCount ?? 1;
       if (geom.vertexCount <= 0 || instanceCount <= 0) continue;
       pass.draw(geom.vertexCount, instanceCount);
     }
@@ -250,8 +264,7 @@ export class ImagePipeline {
       tileManager = new TileManager<TilePlacement>(4);
       tileManager.init({
         device,
-        tileSize      : tileSpec.tileSize,
-        gridCells     : tileSpec.gridCells,
+        slotSize      : tileSpec.slotSize,
         format        : tileSpec.format,
         bytesPerTexel : tileSpec.bytesPerTexel,
         label         : tileSpec.label,
@@ -379,6 +392,8 @@ export class ImagePipeline {
         pipeline, vertexBuffer, paramsBuffer, modelBuffer: tileModelBuffer,
         bindGroup, tileBindGroup, colormapTexture, layer,
         tileManager,
+        initialTileLevel  : tileSpec!.initialLevel,
+        showingInitialTiles: true,
         geometryVersion    : layer.geometryVersion,
         lastBlending       : layer.blending,
         lastColormapVersion: layer.colormapVersion,
@@ -415,6 +430,7 @@ export class ImagePipeline {
     return {
       pipeline, vertexBuffer, paramsBuffer, modelBuffer,
       storageBuffer, bindGroup, layer,
+      showingInitialTiles: false,
       geometryVersion    : layer.geometryVersion,
       lastBlending       : layer.blending,
       lastColormapVersion: layer.colormapVersion,
@@ -443,7 +459,8 @@ export class ImagePipeline {
    */
   private resetTileResidency(ds: LayerRenderer): void {
     ds.tileManager?.reset();
-    ds.lastTileLevel    = undefined;
+    ds.currentTileLevel = undefined;
+    ds.showingInitialTiles = ds.initialTileLevel !== undefined;
     ds.lastDataVersion  = ds.layer.dataVersion;
   }
 

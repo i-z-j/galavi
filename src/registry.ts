@@ -24,7 +24,6 @@ import {
   FlyControl,
   OrbitControl,
   PanZoomControl,
-  ResolutionControl,
   type ControlClass,
 } from "./control";
 import {
@@ -128,7 +127,7 @@ const getLayerClasses   = (): readonly LayerClass[]   => [
   SegmentationLayer, VectorsLayer, TracksLayer, NetworkLayer,
 ];
 const getControlClasses = (): readonly ControlClass[] => [
-  OrbitControl, FlyControl, PanZoomControl, ResolutionControl,
+  OrbitControl, FlyControl, PanZoomControl,
 ];
 const getOverlayClasses = (): readonly OverlayClass[] => [
   ScaleBarOverlay, TextOverlay, MarkerOverlay,

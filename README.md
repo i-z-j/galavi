@@ -10,7 +10,8 @@ Galavi is a WebGPU visualization library for shared-state scientific viewers. It
 - Shared, serializable `State` model — physical space, layers, exploration — diffable across view layouts.
 - Tile-based multi-resolution loading for large OME-Zarr and similar pyramidal datasets.
 - Built-in views: `volume` (3D perspective), `slice` (2D ortho), `navigator` (3D overview).
-- Built-in controls: `orbit`, `fly`, `panzoom`, `resolution` — pure reducers, view-local.
+- Built-in controls: `orbit`, `fly`, `panzoom` — pure reducers, view-local.
+- Automatic physical-scale resolution selection with coarse-first loading and dynamic visible storage chunks.
 - Built-in overlays: `marker`, `text`, `scalebar` — bound to a live view.
 - Built-in layers: volume, slice, surface, shape, points, network, segmentation, vectors, tracks, planes.
 - Extensible registries for layers, views, controls, and overlays — add your own without forking.

@@ -24,9 +24,10 @@ export type {
   TemporalConfig,
   ChannelConfig,
   Data,
+  ImagePyramid,
+  ImagePyramidLevel,
   Render,
   Camera,
-  Lod,
   Temporal,
   Action,
 } from "./types";
@@ -66,8 +67,8 @@ export { BaseView } from "./view";
 //                         TileLoader, TilePlacement, TilePlan, TileCoord,
 //                         TilePoolConfig, planTiles, tileId, buildTileFetcher,
 //                         sourceChanged, resolveDataUrl,
-//                         getPyramidLevelScale, clampPyramidLevel,
-//                         pickPyramidLevel, resolvePyramidLevel,
+//                         countPyramidLevelTiles, pickPyramidLevel,
+//                         TileBounds, TileViewport,
 //                         floatToFloat16
 //   - Input             — normalizeWheel, normalizeDrag
 //

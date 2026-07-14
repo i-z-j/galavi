@@ -5,7 +5,7 @@
  * 2D tiles use depth=1 (same code path).
  */
 
-import type { Data, Vec3 } from "../types";
+import type { Data, ImagePyramid, ImagePyramidLevel, Vec3 } from "../types";
 
 // ============================================================================
 // TILE TYPES
@@ -18,9 +18,7 @@ export interface TileCoord {
 
 /** Tile source — describes a tiled dataset for the tile pool / loader */
 export interface TileSource {
-  size       : Vec3;
-  tileSize   : Vec3;
-  levelRange : [number, number];
+  pyramid: ImagePyramid;
   fetchTile(coord: TileCoord): Promise<ArrayBuffer>;
 }
 
@@ -61,80 +59,93 @@ function assertValidLevel(level: number): void {
 // Pyramid level resolution
 // ----------------------------------------------------------------------------
 
-/**
- * Per-level voxel scale relative to level 0 (e.g. [2, 2, 2] at level 1).
- * Defaults to a uniform power-of-two pyramid when `levelScales` is absent.
- */
-export function getPyramidLevelScale(
-  level         : number,
-  levelScales?  : readonly Vec3[],
-): Vec3 {
-  const configured = levelScales?.[level];
-  if (configured) return configured;
-  const fallback = 2 ** level;
-  return [fallback, fallback, fallback];
+export interface TileBounds {
+  /** Inclusive lower bound in normalized data coordinates. */
+  min: number[];
+  /** Exclusive upper bound in normalized data coordinates. */
+  max: number[];
 }
 
-/** Clamp a pyramid level into the inclusive [min,max] range. */
-export function clampPyramidLevel(
-  level       : number,
-  levelRange  : readonly [number, number],
+export interface PyramidLevelSelection {
+  /** Physical world units represented by one display pixel. */
+  worldUnitsPerPixel: number;
+  /** Spatial XYZ axes visible in this view, in view-coordinate order. */
+  axes: readonly (0 | 1 | 2)[];
+  /** Visible normalized data bounds, in the same order as `axes`. */
+  bounds?: TileBounds;
+  /** Maximum number of simultaneously visible storage chunks. */
+  tileBudget?: number;
+}
+
+/** Count storage chunks intersecting normalized bounds at one pyramid level. */
+export function countPyramidLevelTiles(
+  level  : ImagePyramidLevel,
+  axes   : readonly (0 | 1 | 2)[],
+  bounds : TileBounds,
 ): number {
-  return Math.max(levelRange[0], Math.min(levelRange[1], level));
+  let count = 1;
+  for (let index = 0; index < axes.length; index++) {
+    const axis       = axes[index];
+    const shape      = Math.max(1, level.shape[axis]);
+    const chunkSize  = Math.max(1, level.chunkSize[axis]);
+    const lower      = Math.max(0, Math.min(1, bounds.min[index] ?? 0));
+    const upper      = Math.max(lower, Math.min(1, bounds.max[index] ?? 1));
+    if (upper <= lower) return 0;
+    const firstChunk = Math.floor((lower * shape) / chunkSize);
+    const lastChunk  = Math.max(firstChunk, Math.ceil((upper * shape) / chunkSize) - 1);
+    count *= lastChunk - firstChunk + 1;
+  }
+  return count;
 }
 
 /**
- * Choose the coarsest pyramid level whose sampling density still satisfies
- * `effectiveScale`. With no `levelScales`, behaves as a uniform power-of-two
- * pyramid: `levelRange[1] - floor(log2(effectiveScale))`.
+ * Select the coarsest useful pyramid level for the current display.
+ *
+ * A level is useful while each visible-axis voxel projects to at most one
+ * display pixel. This avoids loading resolution the canvas cannot show. If
+ * that level's visible chunks exceed the cache budget, progressively coarser
+ * levels are considered until the complete visible set fits.
  */
 export function pickPyramidLevel(
-  effectiveScale  : number,
-  levelRange      : readonly [number, number],
-  levelScales?    : readonly Vec3[],
+  pyramid   : ImagePyramid,
+  selection : PyramidLevelSelection,
 ): number {
-  let bestLevel = levelRange[1];
-  const coarsestScale   = getPyramidLevelScale(bestLevel, levelScales);
-  const coarsestMetric  = Math.max(coarsestScale[0], coarsestScale[1], coarsestScale[2]);
-  const desiredMetric   = coarsestMetric / Math.max(effectiveScale, 1e-6);
-  for (let level = levelRange[1]; level >= levelRange[0]; level--) {
-    const s = getPyramidLevelScale(level, levelScales);
-    if (Math.max(s[0], s[1], s[2]) >= desiredMetric) {
-      bestLevel = level;
-    } else {
-      break;
+  if (pyramid.levels.length === 0) {
+    throw new Error("Image pyramid must contain at least one level");
+  }
+
+  const worldUnitsPerPixel = Math.max(selection.worldUnitsPerPixel, Number.EPSILON);
+  let bestLevel = 0;
+  for (let index = 0; index < pyramid.levels.length; index++) {
+    const level = pyramid.levels[index];
+    const projectedVoxelPixels = Math.max(
+      ...selection.axes.map((axis) => level.scale[axis] / worldUnitsPerPixel),
+    );
+    if (projectedVoxelPixels <= 1 + 1e-6) bestLevel = index;
+  }
+
+  const budget = selection.tileBudget;
+  const bounds = selection.bounds;
+  if (budget === undefined || !bounds) return bestLevel;
+
+  for (let index = bestLevel; index < pyramid.levels.length; index++) {
+    if (countPyramidLevelTiles(pyramid.levels[index], selection.axes, bounds) <= budget) {
+      return index;
     }
   }
-  return bestLevel;
-}
-
-/**
- * Resolve a pyramid level given mode + auto/manual hints. In manual mode,
- * clamps `resolutionLevel` (or `fallbackLevel`) to range. In auto mode,
- * delegates to `pickPyramidLevel`.
- */
-export function resolvePyramidLevel(
-  effectiveScale  : number,
-  levelRange      : readonly [number, number],
-  opts: {
-    resolutionMode?   : "auto" | "manual";
-    resolutionLevel?  : number;
-    levelScales?      : readonly Vec3[];
-    fallbackLevel?    : number;
-  } = {},
-): number {
-  if (opts.resolutionMode === "manual") {
-    const requested = opts.resolutionLevel ?? opts.fallbackLevel ?? levelRange[0];
-    return clampPyramidLevel(Math.round(requested), levelRange);
-  }
-  return pickPyramidLevel(effectiveScale, levelRange, opts.levelScales);
+  return pyramid.levels.length - 1;
 }
 
 export function sourceChanged(
-  next?: Pick<Data, "url" | "urlTemplate">,
-  prev?: Pick<Data, "url" | "urlTemplate">,
+  next?: Data,
+  prev?: Data,
 ): boolean {
-  return sourceKey(next) !== sourceKey(prev);
+  return (
+    next?.url !== prev?.url ||
+    next?.urlTemplate !== prev?.urlTemplate ||
+    next?.fetch !== prev?.fetch ||
+    next?.pyramid !== prev?.pyramid
+  );
 }
 
 /**
@@ -178,10 +189,6 @@ function buildTileUrl(
   });
 }
 
-function sourceKey(source?: Pick<Data, "url" | "urlTemplate">): string {
-  return source?.urlTemplate ?? source?.url ?? "";
-}
-
 // ============================================================================
 // TILE POOL
 // ============================================================================
@@ -192,17 +199,15 @@ export function tileId(coord: TileCoord): string {
 
 export interface TilePoolConfig {
   device          : GPUDevice;
-  /** Tile dimensions in texels: [width, height, depth]. Use depth=1 for 2D tiles. */
-  tileSize        : Vec3;
-  /** Optional explicit grid cell count. Defaults to 9 for 2D tiles and 27 for 3D tiles. */
-  gridCells?      : 9 | 27;
+  /** Maximum storage-chunk dimensions in texels. Use depth=1 for 2D tiles. */
+  slotSize        : Vec3;
   /** Texture format (default: "r16float") */
   format?         : GPUTextureFormat;
   /** Bytes per texel for the format (default: 2 for r16float) */
   bytesPerTexel?  : number;
   /** Optional label prefix for GPU resources */
   label?          : string;
-  /** Maximum pool size cap (default: computed from GPU limits) */
+  /** Optional slot cap (default: 128 MiB aggregate estimate, bounded by GPU limits) */
   maxPoolSize?    : number;
 }
 
@@ -213,12 +218,25 @@ export interface TilePoolConfig {
  * layers themselves never touch the GPU.
  */
 export interface TileSpec {
-  tileSize        : Vec3;
-  gridCells?      : 9 | 27;
+  slotSize        : Vec3;
+  /** Coarsest pyramid level used for the first visible frame. */
+  initialLevel    : number;
   format?         : GPUTextureFormat;
   bytesPerTexel?  : number;
   label?          : string;
   maxPoolSize?    : number;
+}
+
+/** View-derived inputs for automatic level selection and visible tile planning. */
+export interface TileViewport {
+  /** Visible normalized data bounds in layer-local view-axis order. */
+  bounds             : TileBounds;
+  /** Physical world units represented by one display pixel. */
+  worldUnitsPerPixel : number;
+  /** Maximum visible storage chunks supported by the renderer cache. */
+  tileBudget         : number;
+  /** Internal coarse-first override; omitted for automatic selection. */
+  level?             : number;
 }
 
 /**
@@ -228,7 +246,6 @@ export interface TileSpec {
 export interface TileFramePlan<T extends TilePlacement = TilePlacement> {
   plan       : TilePlan<T>;
   loader     : TileLoader<T>;
-  inBounds?  : (tile: T) => boolean;
 }
 
 
@@ -310,47 +327,76 @@ export class TilePool {
   private tileMap     = new Map<string, number>();
   private slotToTile  = new Map<number, string>();
 
-  /** Grid cells: 9 (3×3×1) for 2D tiles, 27 (3×3×3) for 3D tiles */
-  readonly grid                   : number;
   readonly poolSize               : number;
   readonly invPoolSize            : number;
   readonly device                 : GPUDevice;
   private readonly format         : GPUTextureFormat;
   private readonly bytesPerTexel  : number;
-  readonly tileSize               : Vec3;
+  readonly slotSize               : Vec3;
   private readonly poolLayout     : Vec3;
 
   constructor(config: TilePoolConfig) {
     this.device         = config.device;
-    this.tileSize       = config.tileSize;
+    this.slotSize       = config.slotSize;
     this.format         = config.format ?? "r16float";
     this.bytesPerTexel  = config.bytesPerTexel ?? 2;
-    this.grid           = config.gridCells ?? (this.tileSize[2] === 1 ? 9 : 27);
 
     const label       = config.label ?? "TilePool";
     const maxTexSize  = config.device.limits.maxTextureDimension3D;
-    const userMaxPool = config.maxPoolSize ?? Infinity;
+    const capX = Math.floor(maxTexSize / this.slotSize[0]);
+    const capY = Math.floor(maxTexSize / this.slotSize[1]);
+    const capZ = Math.floor(maxTexSize / Math.max(1, this.slotSize[2]));
+    if (capX < 1 || capY < 1 || capZ < 1) {
+      throw new Error(`Storage chunk ${this.slotSize.join("x")} exceeds WebGPU 3D texture limits`);
+    }
 
-    const capX = Math.floor(maxTexSize / this.tileSize[0]);
-    const capY = Math.floor(maxTexSize / this.tileSize[1]);
-    const capZ = Math.floor(maxTexSize / Math.max(1, this.tileSize[2]));
-    // Default capacity = grid × 3 history frames (covers current viewport plus
-    // two frames worth of in-flight loads / hysteresis).
-    const desiredSlots = Number.isFinite(userMaxPool) ? userMaxPool : this.grid * 3;
-
-    const n = Math.max(1, Math.ceil(Math.cbrt(desiredSlots)));
-    const x = Math.min(n, capX);
-    const y = Math.min(n, capY);
-    const z = Math.min(n, capZ);
+    const tileBytes        = this.slotSize[0] * this.slotSize[1] * this.slotSize[2] * this.bytesPerTexel;
+    const perSlotBytes     = tileBytes + REGION_STRIDE + 12;
+    const defaultPoolSize  = Math.max(2, Math.floor((128 * 1024 * 1024) / perSlotBytes));
+    const storageSlotCap   = Math.floor(config.device.limits.maxStorageBufferBindingSize / REGION_STRIDE);
+    const bufferSlotCap    = Math.floor(config.device.limits.maxBufferSize / REGION_STRIDE);
+    if (config.maxPoolSize !== undefined && config.maxPoolSize < 2) {
+      throw new Error("Tile pool maxPoolSize must allow a placeholder and one data slot");
+    }
+    const requestedSlots   = Number.isFinite(config.maxPoolSize)
+      ? Math.floor(config.maxPoolSize!)
+      : defaultPoolSize;
+    const desiredSlots     = Math.min(
+      requestedSlots,
+      capX * capY * capZ,
+      storageSlotCap,
+      bufferSlotCap,
+    );
+    if (desiredSlots < 2) {
+      throw new Error("WebGPU limits cannot fit a placeholder and one storage chunk");
+    }
+    const poolLayout: Vec3 = [1, 1, 1];
+    const axisCaps: Vec3 = [capX, capY, capZ];
+    let poolSize = 1;
+    while (true) {
+      let selectedAxis = -1;
+      for (let axis = 0; axis < 3; axis++) {
+        if (poolLayout[axis] >= axisCaps[axis]) continue;
+        const nextSize = (poolSize / poolLayout[axis]) * (poolLayout[axis] + 1);
+        if (nextSize > desiredSlots) continue;
+        if (selectedAxis < 0 || poolLayout[axis] < poolLayout[selectedAxis]) {
+          selectedAxis = axis;
+        }
+      }
+      if (selectedAxis < 0) break;
+      poolSize = (poolSize / poolLayout[selectedAxis]) * (poolLayout[selectedAxis] + 1);
+      poolLayout[selectedAxis]++;
+    }
+    const [x, y, z] = poolLayout;
 
     this.poolLayout   = [x, y, z];
-    this.poolSize     = x * y * z;
+    this.poolSize     = poolSize;
     this.invPoolSize  = 1 / this.poolSize;
 
     const textureSize: Vec3 = [
-      x * this.tileSize[0],
-      y * this.tileSize[1],
-      z * Math.max(1, this.tileSize[2]),
+      x * this.slotSize[0],
+      y * this.slotSize[1],
+      z * Math.max(1, this.slotSize[2]),
     ];
 
     this.texture = config.device.createTexture({
@@ -363,7 +409,7 @@ export class TilePool {
 
     this.indexBuffer = config.device.createBuffer({
       label : `${label} Index Buffer`,
-      size  : this.grid * 2 * 4,
+      size  : Math.max(this.poolSize * 2 * 4, 8),
       usage : GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
 
@@ -384,7 +430,7 @@ export class TilePool {
   }
 
   private initPlaceholderTile(): void {
-    const texSize: Vec3 = [...this.tileSize];
+    const texSize: Vec3 = [...this.slotSize];
     const numTexels     = texSize[0] * texSize[1] * texSize[2];
     const data          = new ArrayBuffer(numTexels * this.bytesPerTexel);
 
@@ -414,7 +460,6 @@ export class TilePool {
     this.device.queue.writeBuffer(this.readyBuffer, 0, new Uint32Array([1]));
   }
 
-  get gridSize(): number { return this.grid; }
   get capacity(): number { return this.poolSize; }
 
   getSlot(tileId: string): number | undefined {
@@ -449,7 +494,8 @@ export class TilePool {
   uploadTile(
     slot    : number,
     data    : ArrayBuffer,
-    region  : { start: number[]; scale: number[] },
+    region  : { start: Vec3; size: Vec3 },
+    tileSize: Vec3,
   ): void {
     const tilesPerLayer = this.poolLayout[0] * this.poolLayout[1];
     const zTile         = Math.floor(slot / tilesPerLayer);
@@ -458,12 +504,12 @@ export class TilePool {
     const xTile         = remainder % this.poolLayout[0];
 
     const origin = {
-      x: xTile * this.tileSize[0],
-      y: yTile * this.tileSize[1],
-      z: zTile * this.tileSize[2],
+      x: xTile * this.slotSize[0],
+      y: yTile * this.slotSize[1],
+      z: zTile * this.slotSize[2],
     };
 
-    const expectedBytes = this.tileSize[0] * this.tileSize[1] * this.tileSize[2] * this.bytesPerTexel;
+    const expectedBytes = tileSize[0] * tileSize[1] * tileSize[2] * this.bytesPerTexel;
     if ((data?.byteLength ?? 0) < expectedBytes) {
       console.warn(`[TilePool] uploadTile: slot=${slot} expected ${expectedBytes} bytes, got ${data?.byteLength ?? 0}. Skipping.`);
       const id = this.slotToTile.get(slot);
@@ -477,14 +523,14 @@ export class TilePool {
     this.device.queue.writeTexture(
       { texture: this.texture, origin },
       data,
-      { bytesPerRow: this.tileSize[0] * this.bytesPerTexel, rowsPerImage: this.tileSize[1] },
-      this.tileSize,
+      { bytesPerRow: tileSize[0] * this.bytesPerTexel, rowsPerImage: tileSize[1] },
+      tileSize,
     );
 
     const poolTexSize = [
-      this.poolLayout[0] * this.tileSize[0],
-      this.poolLayout[1] * this.tileSize[1],
-      this.poolLayout[2] * this.tileSize[2],
+      this.poolLayout[0] * this.slotSize[0],
+      this.poolLayout[1] * this.slotSize[1],
+      this.poolLayout[2] * this.slotSize[2],
     ];
     const texOffset = [
       origin.x / poolTexSize[0],
@@ -492,19 +538,20 @@ export class TilePool {
       origin.z / poolTexSize[2],
     ];
     const texScale = [
-      this.tileSize[0] / poolTexSize[0],
-      this.tileSize[1] / poolTexSize[1],
-      this.tileSize[2] / poolTexSize[2],
+      tileSize[0] / poolTexSize[0],
+      tileSize[1] / poolTexSize[1],
+      tileSize[2] / poolTexSize[2],
     ];
     const bias = [
-      -(region.start[0] ?? 0) * (region.scale[0] ?? 1),
-      -(region.start[1] ?? 0) * (region.scale[1] ?? 1),
-      -(region.start[2] ?? 0) * (region.scale[2] ?? 1),
+      -region.start[0] / region.size[0],
+      -region.start[1] / region.size[1],
+      -region.start[2] / region.size[2],
     ];
+    const scale: Vec3 = [1 / region.size[0], 1 / region.size[1], 1 / region.size[2]];
 
     const regionData = new Float32Array([
-      region.start[0] ?? 0, region.start[1] ?? 0, region.start[2] ?? 0, 0,
-      region.scale[0] ?? 1, region.scale[1] ?? 1, region.scale[2] ?? 1, 0,
+      region.start[0], region.start[1], region.start[2], 0,
+      scale[0], scale[1], scale[2], 0,
       bias[0], bias[1], bias[2], 0,
       texOffset[0], texOffset[1], texOffset[2], 0,
       texScale[0], texScale[1], texScale[2], 0,
@@ -528,13 +575,10 @@ export class TilePool {
 // ============================================================================
 
 /**
- * Per-tile fetch + region strategy used by `TileManager.loadOne`.
- * Layers (Volume, Slice) supply this to express how a tile resolves into
- * bytes and a viewport-region descriptor for `TilePool.uploadTile`.
+ * Per-tile fetch strategy used by `TileManager.loadOne`.
  */
 export interface TileLoader<T extends { id: string }> {
-  fetch(req: T)  : Promise<ArrayBuffer>;
-  region(req: T) : { start: number[]; scale: number[] };
+  fetch(req: T): Promise<ArrayBuffer>;
 }
 
 // ----------------------------------------------------------------------------
@@ -551,109 +595,129 @@ export interface TilePlacement {
   gridIdx   : number;
   voxelPos  : number[];
   level     : number;
+  chunkSize : Vec3;
+  region    : { start: Vec3; size: Vec3 };
 }
 
 export interface TilePlan<T extends TilePlacement> {
-  /** Viewport origin in normalized data-space (length = gridDim). */
+  /** Visible viewport origin in normalized data-space (length = gridDim). */
   viewportOrigin  : number[];
-  /** Viewport size in normalized data-space (length = gridDim). */
+  /** Visible viewport size in normalized data-space (length = gridDim). */
   viewportSize    : number[];
-  /** Center bucket coords (length = gridDim). */
-  bucket          : number[];
+  /** First visible storage-chunk coordinate (length = gridDim). */
+  gridOrigin      : number[];
+  /** Visible storage-chunk count per axis (length = gridDim). */
+  gridShape       : number[];
   /** Per-axis tile size in normalized [0,1] (length = gridDim). */
   tileNormSize    : number[];
-  /** Generated tile descriptors. Length = 3 ** gridDim. */
+  /** Generated visible tile descriptors, x-fastest. */
   tiles           : T[];
-  /** Dimensionality of the planar grid: 2 (3×3) or 3 (3×3×3). */
+  /** Dimensionality of the visible grid. */
   gridDim         : 2 | 3;
 }
 
 /**
- * Plan a 3×3 (gridDim=2) or 3×3×3 (gridDim=3) tile grid centered on `target`.
- * Computes the viewport that exposes the grid's data range, and emits one tile
- * placement per cell. `makeTile` is invoked with the gridIdx and voxel-space
- * position for each cell so layers can extend the placement shape.
+ * Plan every storage chunk intersecting normalized viewport bounds.
+ * `makeTile` can remap view axes and attach layer-specific request metadata.
  */
 export function planTiles<T extends TilePlacement>(opts: {
-  target      : readonly number[];
-  tileSize    : readonly number[];
+  bounds      : TileBounds;
+  chunkSize   : readonly number[];
   resSize     : readonly number[];
   gridDim     : 2 | 3;
   level       : number;
-  /** Min bucket clamp (defaults to 1 so dx=-1 stays non-negative). */
-  minBucket?  : number;
   /** Construct a tile placement; layer can attach extra fields. */
-  makeTile    : (gridIdx: number, voxelPos: number[], level: number) => T;
+  makeTile    : (
+    gridIdx  : number,
+    voxelPos : number[],
+    level    : number,
+    region   : { start: number[]; size: number[] },
+  ) => T;
 }): TilePlan<T> {
-  const { target, tileSize, resSize, gridDim, level, makeTile } = opts;
-  const minBucket  = opts.minBucket ?? 1;
-
-  const tileNormSize = new Array<number>(gridDim);
-  const bucket       = new Array<number>(gridDim);
+  const { bounds, chunkSize, resSize, gridDim, level, makeTile } = opts;
+  const tileNormSize  = new Array<number>(gridDim);
+  const gridOrigin    = new Array<number>(gridDim);
+  const gridShape     = new Array<number>(gridDim);
   const viewportOrigin = new Array<number>(gridDim);
   const viewportSize   = new Array<number>(gridDim);
-  for (let i = 0; i < gridDim; i++) {
-    tileNormSize[i]   = tileSize[i] / resSize[i];
-    bucket[i]         = Math.max(minBucket, Math.floor(target[i] / tileNormSize[i]));
-    viewportOrigin[i] = (bucket[i] - 1) * tileNormSize[i];
-    viewportSize[i]   = 3 * tileNormSize[i];
+  for (let axis = 0; axis < gridDim; axis++) {
+    const size        = Math.max(1, resSize[axis]);
+    const chunk       = Math.max(1, chunkSize[axis]);
+    const lower       = Math.max(0, Math.min(1, bounds.min[axis] ?? 0));
+    const upper       = Math.max(lower, Math.min(1, bounds.max[axis] ?? 1));
+    const firstChunk  = Math.floor((lower * size) / chunk);
+    const intersects  = upper > lower;
+    const lastChunk   = intersects
+      ? Math.max(firstChunk, Math.ceil((upper * size) / chunk) - 1)
+      : firstChunk - 1;
+    tileNormSize[axis]  = chunk / size;
+    gridOrigin[axis]    = firstChunk;
+    gridShape[axis]     = Math.max(0, lastChunk - firstChunk + 1);
+    viewportOrigin[axis] = lower;
+    viewportSize[axis]   = upper - lower;
   }
 
   const tiles: T[] = [];
   if (gridDim === 3) {
-    for (let dz = -1; dz <= 1; dz++) {
-      for (let dy = -1; dy <= 1; dy++) {
-        for (let dx = -1; dx <= 1; dx++) {
-          const gridIdx = (dz + 1) * 9 + (dy + 1) * 3 + (dx + 1);
+    for (let z = 0; z < gridShape[2]; z++) {
+      for (let y = 0; y < gridShape[1]; y++) {
+        for (let x = 0; x < gridShape[0]; x++) {
+          const gridIdx = z * gridShape[0] * gridShape[1] + y * gridShape[0] + x;
           const voxelPos = [
-            (bucket[0] + dx) * tileSize[0],
-            (bucket[1] + dy) * tileSize[1],
-            (bucket[2] + dz) * tileSize[2],
+            (gridOrigin[0] + x) * chunkSize[0],
+            (gridOrigin[1] + y) * chunkSize[1],
+            (gridOrigin[2] + z) * chunkSize[2],
           ];
-          tiles.push(makeTile(gridIdx, voxelPos, level));
+          const region = {
+            start: voxelPos.map((value, axis) => value / resSize[axis]),
+            size : tileNormSize.slice(),
+          };
+          tiles.push(makeTile(gridIdx, voxelPos, level, region));
         }
       }
     }
   } else {
-    for (let dy = -1; dy <= 1; dy++) {
-      for (let dx = -1; dx <= 1; dx++) {
-        const gridIdx = (dy + 1) * 3 + (dx + 1);
+    for (let y = 0; y < gridShape[1]; y++) {
+      for (let x = 0; x < gridShape[0]; x++) {
+        const gridIdx = y * gridShape[0] + x;
         const voxelPos = [
-          (bucket[0] + dx) * tileSize[0],
-          (bucket[1] + dy) * tileSize[1],
+          (gridOrigin[0] + x) * chunkSize[0],
+          (gridOrigin[1] + y) * chunkSize[1],
         ];
-        tiles.push(makeTile(gridIdx, voxelPos, level));
+        const region = {
+          start: voxelPos.map((value, axis) => value / resSize[axis]),
+          size : tileNormSize.slice(),
+        };
+        tiles.push(makeTile(gridIdx, voxelPos, level, region));
       }
     }
   }
 
-  return { viewportOrigin, viewportSize, bucket, tileNormSize, tiles, gridDim };
-}
-
-/** Manhattan distance from grid center; works for 2D (9 cells) and 3D (27). */
-function tileDistanceFromCenter(gridIdx: number, gridDim: 2 | 3): number {
-  const x = gridIdx % 3;
-  const y = Math.floor(gridIdx / 3) % 3;
-  if (gridDim === 2) return Math.abs(x - 1) + Math.abs(y - 1);
-  const z = Math.floor(gridIdx / 9);
-  return Math.abs(x - 1) + Math.abs(y - 1) + Math.abs(z - 1);
+  return {
+    viewportOrigin,
+    viewportSize,
+    gridOrigin,
+    gridShape,
+    tileNormSize,
+    tiles,
+    gridDim,
+  };
 }
 
 /**
  * `TileManager<T>` — composition helper held by tileable layers.
  *
- * Owns a `TilePool` + `TileLoadQueue` + `loadedTiles` eviction set, the per-grid
- * `prevIndices` mapping, and a shared `pump`/`loadOne` runner. Concrete layers
- * compute the per-frame `TilePlan` (level, resSize, makeTile) and call
- * `commit(plan, loader, opts?)` to push the plan onto the GPU + load queue.
+ * Owns a `TilePool` + `TileLoadQueue` + loaded placement map and a shared
+ * `pump`/`loadOne` runner. Concrete layers compute the per-frame visible
+ * `TilePlan` and call `commit(plan, loader)` to push it onto the GPU + load queue.
  */
 export class TileManager<T extends TilePlacement> {
   pool?                 : TilePool;
   readonly queue        : TileLoadQueue<T>;
-  readonly loadedTiles  = new Set<string>();
+  readonly loadedTiles  = new Map<string, T>();
   private loader?       : TileLoader<T>;
   private onUpdate?     : () => void;
-  private prevIndices   : number[] = [];
+  private desiredTiles  = new Set<string>();
 
   constructor(maxConcurrent = 4) {
     this.queue = new TileLoadQueue<T>(maxConcurrent);
@@ -673,16 +737,21 @@ export class TileManager<T extends TilePlacement> {
     this.onUpdate = cb;
   }
 
-  /** Forget the previous-frame slot mapping (e.g. on level / source change). */
-  invalidatePrev(): void {
-    this.prevIndices = [];
+  /** Whether at least one tile in the current visible plan is resident. */
+  hasVisibleTile(): boolean {
+    const pool = this.pool;
+    if (!pool) return false;
+    for (const id of this.desiredTiles) {
+      if (pool.getSlot(id) !== undefined) return true;
+    }
+    return false;
   }
 
   /**
-   * Push a `planTiles` result onto the GPU + load queue:
-   *   1. Write index buffer (current + prev slot per grid cell).
-   *   2. Filter tiles needing a fetch (in-bounds, no slot, not loading).
-   *   3. Sort by Manhattan distance from grid center.
+  * Push a `planTiles` result onto the GPU + load queue:
+  *   1. Write index buffer (current + spatial fallback per visible chunk).
+  *   2. Filter tiles needing a fetch.
+  *   3. Sort by distance from the visible viewport center.
    *   4. Bind per-frame loader, set the desired set, pump the queue.
    *
    * Layers must call `setOnUpdate`/`setLoader` once at construction; `commit`
@@ -692,37 +761,44 @@ export class TileManager<T extends TilePlacement> {
   commit(
     plan    : TilePlan<T>,
     loader  : TileLoader<T>,
-    opts?   : { inBounds?: (tile: T) => boolean },
   ): void {
     const pool = this.pool;
     if (!pool) return;
 
     const cellCount  = plan.tiles.length;
+    if (cellCount >= pool.capacity) {
+      throw new Error(
+        `Visible tile count ${cellCount} exceeds tile cache budget ${pool.capacity - 1}`,
+      );
+    }
     const indices    = new Uint32Array(cellCount * 2);
     for (const tile of plan.tiles) {
-      const slot     = pool.getSlot(tile.id) ?? 0;
-      const prevSlot = this.prevIndices[tile.gridIdx] ?? 0;
+      const slot         = pool.getSlot(tile.id) ?? 0;
+      const fallbackSlot = slot === 0 ? this.findCoveringSlot(tile, pool) : slot;
       indices[tile.gridIdx * 2]     = slot;
-      indices[tile.gridIdx * 2 + 1] = prevSlot;
+      indices[tile.gridIdx * 2 + 1] = fallbackSlot;
     }
-    pool.device.queue.writeBuffer(pool.indexBuffer, 0, indices);
-    this.prevIndices = plan.tiles.map((tile) => pool.getSlot(tile.id) ?? 0);
+    if (indices.byteLength > 0) {
+      pool.device.queue.writeBuffer(pool.indexBuffer, 0, indices);
+    }
 
-    const inBounds = opts?.inBounds;
+    const center = plan.viewportOrigin.map((origin, axis) => (
+      origin + plan.viewportSize[axis] / 2
+    ));
     const tilesToLoad = plan.tiles
       .filter((tile) => {
-        if (inBounds && !inBounds(tile)) return false;
         const hasSlot = pool.getSlot(tile.id) !== undefined;
         if (!hasSlot) this.loadedTiles.delete(tile.id);
         return !hasSlot && !this.queue.isLoading(tile.id);
       })
       .sort((a, b) => (
-        tileDistanceFromCenter(a.gridIdx, plan.gridDim) -
-        tileDistanceFromCenter(b.gridIdx, plan.gridDim)
+        this.distanceFromCenter(a, center, plan.gridDim) -
+        this.distanceFromCenter(b, center, plan.gridDim)
       ));
 
     this.setLoader(loader);
-    this.queue.setDesired(plan.tiles.map((tile) => tile.id), tilesToLoad);
+    this.desiredTiles = new Set(plan.tiles.map((tile) => tile.id));
+    this.queue.setDesired(this.desiredTiles, tilesToLoad);
     this.pump();
   }
 
@@ -751,9 +827,9 @@ export class TileManager<T extends TilePlacement> {
       if (pool.getSlot(tile.id) !== undefined) return;
       const slot = pool.allocateSlot(tile.id);
       if (slot !== -1) {
-        pool.uploadTile(slot, data, loader.region(tile));
+        pool.uploadTile(slot, data, tile.region, tile.chunkSize);
       }
-      this.loadedTiles.add(tile.id);
+      this.loadedTiles.set(tile.id, tile);
       this.onUpdate?.();
     } catch (e) {
       console.warn(`[TileManager] Failed to load tile ${tile.id}:`, e);
@@ -764,12 +840,46 @@ export class TileManager<T extends TilePlacement> {
     }
   }
 
-  /** Drop all in-flight loads, the cache, the prev-slot map, and the pool. */
+  /** Drop all in-flight loads, cached placements, desired IDs, and pool residency. */
   reset(): void {
     this.queue.reset();
     this.loadedTiles.clear();
-    this.prevIndices = [];
+    this.desiredTiles.clear();
     this.pool?.reset();
+  }
+
+  private findCoveringSlot(tile: T, pool: TilePool): number {
+    const center: Vec3 = [
+      tile.region.start[0] + tile.region.size[0] / 2,
+      tile.region.start[1] + tile.region.size[1] / 2,
+      tile.region.start[2] + tile.region.size[2] / 2,
+    ];
+    let bestSlot = 0;
+    let bestVolume = Infinity;
+    for (const loaded of this.loadedTiles.values()) {
+      const slot = pool.getSlot(loaded.id);
+      if (slot === undefined) continue;
+      const { start, size } = loaded.region;
+      const contains = center.every((value, axis) => (
+        value >= start[axis] && value <= start[axis] + size[axis]
+      ));
+      if (!contains) continue;
+      const volume = size[0] * size[1] * size[2];
+      if (volume < bestVolume) {
+        bestVolume = volume;
+        bestSlot = slot;
+      }
+    }
+    return bestSlot;
+  }
+
+  private distanceFromCenter(tile: T, center: number[], gridDim: 2 | 3): number {
+    let distance = 0;
+    for (let axis = 0; axis < gridDim; axis++) {
+      const tileCenter = tile.region.start[axis] + tile.region.size[axis] / 2;
+      distance += Math.abs(tileCenter - center[axis]);
+    }
+    return distance;
   }
 }
 

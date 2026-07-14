@@ -46,10 +46,8 @@ export {
   floatToFloat16,
   sourceChanged,
   resolveDataUrl,
-  getPyramidLevelScale,
-  clampPyramidLevel,
   pickPyramidLevel,
-  resolvePyramidLevel,
+  countPyramidLevelTiles,
   planTiles,
   type TilePoolConfig,
   type TileCoord,
@@ -59,6 +57,9 @@ export {
   type TilePlacement,
   type TilePlan,
   type TileLoader,
+  type TileBounds,
+  type TileViewport,
+  type PyramidLevelSelection,
 } from "./tile";
 
 // Input normalization
