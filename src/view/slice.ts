@@ -83,8 +83,16 @@ export class SliceView extends BaseView {
     return this.pipeline?.getCurrentLevel(layerId);
   }
 
+  override getResolution(layerId: string) {
+    return this.pipeline?.getResolution(layerId);
+  }
+
   protected override onCanvasFormatChanged(): void {
     this.pipeline?.markDirty();
+  }
+
+  protected override onViewportChanged(): void {
+    this.pipeline?.resetResolutionSelection();
   }
 
   protected renderFrame(state: State): void {

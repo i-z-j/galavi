@@ -17,6 +17,7 @@ import type {
   Camera,
   Render,
   Data,
+  ViewResolution,
 } from "./types";
 import {
   DEFAULT_CAMERA_NAV_MODE,
@@ -47,6 +48,7 @@ type ViewAccessor = {
   setOverlayOptions(overlayType: string, opts: Record<string, unknown>): void;
   getLayer(id: ID): BaseLayer | undefined;
   getCurrentLevel(layerId: ID): number | undefined;
+  getResolution(layerId: ID): ViewResolution | undefined;
   readonly config: ViewConfig;
   readonly base: BaseView;
 };
@@ -312,6 +314,7 @@ export class Galavi {
       },
       getLayer: (id: ID) => vr.layers.get(id),
       getCurrentLevel: (layerId: ID) => vr.view.getCurrentLevel(layerId),
+      getResolution: (layerId: ID) => vr.view.getResolution(layerId),
       get config() {
         return vr.config;
       },

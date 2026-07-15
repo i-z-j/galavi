@@ -16,6 +16,7 @@ import type {
   ID,
   LayerConfig,
   Vec3,
+  ViewResolution,
 } from "../types";
 import type { Galavi } from "../main";
 import {
@@ -137,6 +138,8 @@ export abstract class BaseView {
    * `pipeline.markDirty()` on any owned `ImagePipeline`).
    */
   protected onCanvasFormatChanged(): void {}
+  /** Hook for canvas identity or pixel-size changes that affect view resolution. */
+  protected onViewportChanged(): void {}
   protected onDestroy(): void {}
 
   /**
@@ -146,7 +149,7 @@ export abstract class BaseView {
   protected abstract renderFrame(state: State): void;
   render(state: State): void {
     if (!this.boundCanvas) return;
-    this.resizeCanvasToDisplaySize();
+    if (this.resizeCanvasToDisplaySize()) this.onViewportChanged();
 
     // Apply config + per-frame layer hooks (one pass).
     // Each layer consumes its own LayerConfig, then `prepareFrame` lets layers
@@ -187,6 +190,8 @@ export abstract class BaseView {
       throw new Error("GPU device not set. Call setDevice() before mount().");
     }
 
+    const canvasChanged = this.boundCanvas !== canvas;
+
     // Re-mount onto a different canvas: tear down the previous binding first
     // so overlays detach from the old parent and event handlers don't leak.
     if (this.boundCanvas && this.boundCanvas !== canvas) {
@@ -216,10 +221,13 @@ export abstract class BaseView {
     if (!this.isInitialized) {
       await this.initGPUResources();
       this.isInitialized = true;
-    } else if (formatChanged) {
-      // Format-bound pipelines built against the previous canvas format must
-      // be rebuilt against the new one.
-      this.onCanvasFormatChanged();
+    } else {
+      if (formatChanged) {
+        // Format-bound pipelines built against the previous canvas format must
+        // be rebuilt against the new one.
+        this.onCanvasFormatChanged();
+      }
+      if (canvasChanged) this.onViewportChanged();
     }
 
     // Mount overlays as DOM layers above the canvas
@@ -317,6 +325,11 @@ export abstract class BaseView {
 
   /** View-local pyramid level selected for a tiled layer, if available. */
   getCurrentLevel(_layerId: ID): number | undefined {
+    return undefined;
+  }
+
+  /** View-local image resolution for a tiled layer, if available. */
+  getResolution(_layerId: ID): ViewResolution | undefined {
     return undefined;
   }
 
@@ -467,8 +480,8 @@ export abstract class BaseView {
     return data;
   }
 
-  private resizeCanvasToDisplaySize(): void {
-    if (!this.canvas || !this.context) return;
+  private resizeCanvasToDisplaySize(): boolean {
+    if (!this.canvas || !this.context) return false;
     const dpr = window.devicePixelRatio || 1;
     const width = Math.max(1, Math.floor(this.canvas.clientWidth * dpr));
     const height = Math.max(1, Math.floor(this.canvas.clientHeight * dpr));
@@ -480,7 +493,9 @@ export abstract class BaseView {
         format: this.canvasFormat,
         alphaMode: "premultiplied",
       });
+      return true;
     }
+    return false;
   }
 
   /** Post-control hook for view-specific state constraints. */

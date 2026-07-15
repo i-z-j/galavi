@@ -296,6 +296,11 @@ export abstract class BaseLayer {
     return 0;
   }
 
+  /** Physical source resolution for a pyramid level in this layer's rendered axes. */
+  getLevelResolution(_level: number): number | undefined {
+    return undefined;
+  }
+
   /** Set contrast range */
   setContrast(_min: number, _max: number): void {}
 

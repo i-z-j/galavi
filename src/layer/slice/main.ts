@@ -195,6 +195,12 @@ export class SliceLayer extends BaseLayer {
   override getCurrentLevel(): number {
     return this.currentLevel;
   }
+
+  override getLevelResolution(level: number): number | undefined {
+    const scale = this.source?.pyramid?.levels[level]?.scale;
+    if (!scale) return undefined;
+    return Math.max(scale[this.axisMap[0]], scale[this.axisMap[1]]);
+  }
   private source?      : Data;
   private maxPoolSize? : number;
   private sliceIndex   : number;
@@ -269,9 +275,10 @@ export class SliceLayer extends BaseLayer {
     if (!source || !pyramid?.levels.length) return null;
 
     const [uAxis, vAxis, sliceAxis] = this.axisMap;
-    const level = viewport.level ?? pickPyramidLevel(pyramid, {
-      worldUnitsPerPixel: viewport.worldUnitsPerPixel,
+    const level = viewport.forcedLevel ?? pickPyramidLevel(pyramid, {
+      worldUnitsPerPixel: viewport.selectionUnitsPerPixel ?? viewport.worldUnitsPerPixel,
       axes              : [uAxis, vAxis],
+      currentLevel      : viewport.currentLevel,
       bounds            : viewport.bounds,
       tileBudget        : viewport.tileBudget,
     });

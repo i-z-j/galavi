@@ -85,8 +85,16 @@ export class VolumeView extends BaseView {
     return this.pipeline?.getCurrentLevel(layerId);
   }
 
+  override getResolution(layerId: string) {
+    return this.pipeline?.getResolution(layerId);
+  }
+
   protected override onCanvasFormatChanged(): void {
     this.pipeline?.markDirty();
+  }
+
+  protected override onViewportChanged(): void {
+    this.pipeline?.resetResolutionSelection();
   }
 
   protected renderFrame(state: State): void {
@@ -117,9 +125,11 @@ export class VolumeView extends BaseView {
         const localCorners = segment.corners.map((corner) => (
           this.transformPoint(layer.invModelMatrix, corner)
         ));
-        const worldUnitsPerPixel = (
-          2 * segment.nearDepth * Math.tan(camera.fov / 2)
-        ) / usefulPixels;
+        const verticalSpan = 2 * segment.nearDepth * Math.tan(camera.fov / 2);
+        const worldUnitsPerPixel = verticalSpan / Math.max(1, this.canvas.height);
+        const selectionUnitsPerPixel = (
+          verticalSpan / usefulPixels
+        );
         return {
           bounds: {
             min: [0, 1, 2].map((axis) => (
@@ -130,6 +140,7 @@ export class VolumeView extends BaseView {
             )),
           },
           worldUnitsPerPixel,
+          selectionUnitsPerPixel,
         };
       },
     );

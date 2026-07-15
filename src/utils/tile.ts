@@ -71,6 +71,10 @@ export interface PyramidLevelSelection {
   worldUnitsPerPixel: number;
   /** Spatial XYZ axes visible in this view, in view-coordinate order. */
   axes: readonly (0 | 1 | 2)[];
+  /** Previously selected automatic level for view-local hysteresis. */
+  currentLevel?: number;
+  /** Fractional boundary margin (default 0.15). */
+  hysteresis?: number;
   /** Visible normalized data bounds, in the same order as `axes`. */
   bounds?: TileBounds;
   /** Maximum number of simultaneously visible storage chunks. */
@@ -115,13 +119,38 @@ export function pickPyramidLevel(
   }
 
   const worldUnitsPerPixel = Math.max(selection.worldUnitsPerPixel, Number.EPSILON);
-  let bestLevel = 0;
-  for (let index = 0; index < pyramid.levels.length; index++) {
-    const level = pyramid.levels[index];
-    const projectedVoxelPixels = Math.max(
-      ...selection.axes.map((axis) => level.scale[axis] / worldUnitsPerPixel),
-    );
-    if (projectedVoxelPixels <= 1 + 1e-6) bestLevel = index;
+  const levelMetric = (index: number): number => Math.max(
+    ...selection.axes.map((axis) => pyramid.levels[index].scale[axis]),
+  );
+  const currentLevel = selection.currentLevel;
+  let bestLevel: number;
+  if (
+    currentLevel !== undefined &&
+    Number.isInteger(currentLevel) &&
+    currentLevel >= 0 &&
+    currentLevel < pyramid.levels.length
+  ) {
+    const margin = Math.max(0, selection.hysteresis ?? 0.15);
+    bestLevel = currentLevel;
+    while (
+      bestLevel > 0 &&
+      levelMetric(bestLevel) > worldUnitsPerPixel * (1 + margin)
+    ) {
+      bestLevel--;
+    }
+    while (
+      bestLevel < pyramid.levels.length - 1 &&
+      levelMetric(bestLevel + 1) <= worldUnitsPerPixel / (1 + margin)
+    ) {
+      bestLevel++;
+    }
+  } else {
+    bestLevel = 0;
+    for (let index = 0; index < pyramid.levels.length; index++) {
+      if (levelMetric(index) <= worldUnitsPerPixel * (1 + 1e-6)) {
+        bestLevel = index;
+      }
+    }
   }
 
   const budget = selection.tileBudget;
@@ -231,12 +260,16 @@ export interface TileSpec {
 export interface TileViewport {
   /** Visible normalized data bounds in layer-local view-axis order. */
   bounds             : TileBounds;
-  /** Physical world units represented by one display pixel. */
+  /** Physical world units represented by one canvas pixel. */
   worldUnitsPerPixel : number;
+  /** Renderer sampling scale used for level selection; defaults to canvas scale. */
+  selectionUnitsPerPixel?: number;
   /** Maximum visible storage chunks supported by the renderer cache. */
   tileBudget         : number;
-  /** Internal coarse-first override; omitted for automatic selection. */
-  level?             : number;
+  /** Previous view-local automatic level used for hysteresis. */
+  currentLevel?      : number;
+  /** Internal coarse-first override; omitted after initial promotion. */
+  forcedLevel?       : number;
 }
 
 /**
@@ -581,6 +614,11 @@ export interface TileLoader<T extends { id: string }> {
   fetch(req: T): Promise<ArrayBuffer>;
 }
 
+export interface TileCommitResult {
+  /** Coarsest resident level currently supplying any planned cell. */
+  displayedLevel?: number;
+}
+
 // ----------------------------------------------------------------------------
 // Tile-grid planner
 // ----------------------------------------------------------------------------
@@ -600,6 +638,8 @@ export interface TilePlacement {
 }
 
 export interface TilePlan<T extends TilePlacement> {
+  /** Pyramid level represented by this plan, including empty plans. */
+  level           : number;
   /** Visible viewport origin in normalized data-space (length = gridDim). */
   viewportOrigin  : number[];
   /** Visible viewport size in normalized data-space (length = gridDim). */
@@ -694,6 +734,7 @@ export function planTiles<T extends TilePlacement>(opts: {
   }
 
   return {
+    level,
     viewportOrigin,
     viewportSize,
     gridOrigin,
@@ -748,10 +789,10 @@ export class TileManager<T extends TilePlacement> {
   }
 
   /**
-  * Push a `planTiles` result onto the GPU + load queue:
-  *   1. Write index buffer (current + spatial fallback per visible chunk).
-  *   2. Filter tiles needing a fetch.
-  *   3. Sort by distance from the visible viewport center.
+    * Push a `planTiles` result onto the GPU + load queue:
+    *   1. Write index buffer (current + spatial fallback per visible chunk).
+    *   2. Filter tiles needing a fetch.
+    *   3. Sort by distance from the visible viewport center.
    *   4. Bind per-frame loader, set the desired set, pump the queue.
    *
    * Layers must call `setOnUpdate`/`setLoader` once at construction; `commit`
@@ -761,9 +802,9 @@ export class TileManager<T extends TilePlacement> {
   commit(
     plan    : TilePlan<T>,
     loader  : TileLoader<T>,
-  ): void {
+  ): TileCommitResult {
     const pool = this.pool;
-    if (!pool) return;
+    if (!pool) return {};
 
     const cellCount  = plan.tiles.length;
     if (cellCount >= pool.capacity) {
@@ -772,9 +813,17 @@ export class TileManager<T extends TilePlacement> {
       );
     }
     const indices    = new Uint32Array(cellCount * 2);
+    let displayedLevel: number | undefined;
     for (const tile of plan.tiles) {
-      const slot         = pool.getSlot(tile.id) ?? 0;
-      const fallbackSlot = slot === 0 ? this.findCoveringSlot(tile, pool) : slot;
+      const slot = pool.getSlot(tile.id) ?? 0;
+      const fallback = slot === 0 ? this.findCoveringTile(tile, pool) : undefined;
+      const fallbackSlot = fallback ? pool.getSlot(fallback.id) ?? 0 : slot;
+      const providerLevel = slot === 0 ? fallback?.level : tile.level;
+      if (providerLevel !== undefined) {
+        displayedLevel = displayedLevel === undefined
+          ? providerLevel
+          : Math.max(displayedLevel, providerLevel);
+      }
       indices[tile.gridIdx * 2]     = slot;
       indices[tile.gridIdx * 2 + 1] = fallbackSlot;
     }
@@ -800,6 +849,7 @@ export class TileManager<T extends TilePlacement> {
     this.desiredTiles = new Set(plan.tiles.map((tile) => tile.id));
     this.queue.setDesired(this.desiredTiles, tilesToLoad);
     this.pump();
+    return { displayedLevel };
   }
 
   /** Schedule any pending tile loads up to the queue's concurrency limit. */
@@ -848,29 +898,24 @@ export class TileManager<T extends TilePlacement> {
     this.pool?.reset();
   }
 
-  private findCoveringSlot(tile: T, pool: TilePool): number {
-    const center: Vec3 = [
-      tile.region.start[0] + tile.region.size[0] / 2,
-      tile.region.start[1] + tile.region.size[1] / 2,
-      tile.region.start[2] + tile.region.size[2] / 2,
-    ];
-    let bestSlot = 0;
+  private findCoveringTile(tile: T, pool: TilePool): T | undefined {
+    let bestTile: T | undefined;
     let bestVolume = Infinity;
     for (const loaded of this.loadedTiles.values()) {
-      const slot = pool.getSlot(loaded.id);
-      if (slot === undefined) continue;
+      if (pool.getSlot(loaded.id) === undefined) continue;
       const { start, size } = loaded.region;
-      const contains = center.every((value, axis) => (
-        value >= start[axis] && value <= start[axis] + size[axis]
+      const contains = start.every((value, axis) => (
+        value <= tile.region.start[axis] + 1e-9 &&
+        value + size[axis] >= tile.region.start[axis] + tile.region.size[axis] - 1e-9
       ));
       if (!contains) continue;
       const volume = size[0] * size[1] * size[2];
       if (volume < bestVolume) {
         bestVolume = volume;
-        bestSlot = slot;
+        bestTile = loaded;
       }
     }
-    return bestSlot;
+    return bestTile;
   }
 
   private distanceFromCenter(tile: T, center: number[], gridDim: 2 | 3): number {

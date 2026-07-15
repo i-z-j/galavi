@@ -26,6 +26,7 @@ export type {
   Data,
   ImagePyramid,
   ImagePyramidLevel,
+  ViewResolution,
   Render,
   Camera,
   Temporal,

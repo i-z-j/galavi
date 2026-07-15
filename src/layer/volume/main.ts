@@ -149,6 +149,11 @@ export class VolumeLayer extends BaseLayer {
     return this.currentLevel;
   }
 
+  override getLevelResolution(level: number): number | undefined {
+    const scale = this.source?.pyramid?.levels[level]?.scale;
+    return scale ? Math.max(scale[0], scale[1], scale[2]) : undefined;
+  }
+
   // Viewport transform (volume coords where viewport [0,1]³ maps to)
   private viewportOrigin : Vec3 = [0, 0, 0];
   private viewportSize   : Vec3 = [1, 1, 1];
@@ -188,9 +193,10 @@ export class VolumeLayer extends BaseLayer {
     const pyramid = source?.pyramid;
     if (!source || !pyramid?.levels.length) return null;
 
-    const level = viewport.level ?? pickPyramidLevel(pyramid, {
-      worldUnitsPerPixel: viewport.worldUnitsPerPixel,
+    const level = viewport.forcedLevel ?? pickPyramidLevel(pyramid, {
+      worldUnitsPerPixel: viewport.selectionUnitsPerPixel ?? viewport.worldUnitsPerPixel,
       axes              : [0, 1, 2],
+      currentLevel      : viewport.currentLevel,
       bounds            : viewport.bounds,
       tileBudget        : viewport.tileBudget,
     });

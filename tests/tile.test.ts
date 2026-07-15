@@ -30,6 +30,38 @@ describe("automatic pyramid selection", () => {
       tileBudget: 3,
     })).toBe(2);
   });
+
+  test("holds the current level near a boundary and switches after the margin", () => {
+    expect(pickPyramidLevel(pyramid, {
+      worldUnitsPerPixel: 3.8,
+      axes: [0, 1],
+      currentLevel: 1,
+    })).toBe(1);
+
+    expect(pickPyramidLevel(pyramid, {
+      worldUnitsPerPixel: 4.7,
+      axes: [0, 1],
+      currentLevel: 1,
+    })).toBe(2);
+
+    expect(pickPyramidLevel(pyramid, {
+      worldUnitsPerPixel: 3.6,
+      axes: [0, 1],
+      currentLevel: 2,
+    })).toBe(2);
+
+    expect(pickPyramidLevel(pyramid, {
+      worldUnitsPerPixel: 3.4,
+      axes: [0, 1],
+      currentLevel: 2,
+    })).toBe(1);
+
+    expect(pickPyramidLevel(pyramid, {
+      worldUnitsPerPixel: 0.8,
+      axes: [0, 1],
+      currentLevel: 2,
+    })).toBe(0);
+  });
 });
 
 
@@ -86,5 +118,6 @@ describe("visible chunk planning", () => {
 
     expect(plan.gridShape).toEqual([0, 4]);
     expect(plan.tiles).toHaveLength(0);
+    expect(plan.level).toBe(0);
   });
 });

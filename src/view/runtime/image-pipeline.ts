@@ -10,7 +10,7 @@
  *   5. `destroy()`               — view cleanup
  */
 
-import type { Render } from "../../types";
+import type { Render, ViewResolution } from "../../types";
 import {
   getColormapLUT,
   TileManager,
@@ -51,8 +51,10 @@ interface LayerRenderer {
   tileManager?       : TileManager<TilePlacement>;
   /** Coarsest level shown before automatic best-fit streaming starts. */
   initialTileLevel?  : number;
-  /** Pyramid level selected by this view for the current frame. */
-  currentTileLevel?  : number;
+  /** Previous automatic target for view-local level hysteresis. */
+  automaticTileLevel?: number;
+  /** Resolution currently requested/displayed by this view renderer. */
+  resolution?        : ViewResolution;
   showingInitialTiles: boolean;
   /** Layer.dataVersion at last sync — drop tile residency when it bumps. */
   lastDataVersion    : number;
@@ -167,7 +169,10 @@ export class ImagePipeline {
    */
   updateTiles(
     layers      : readonly BaseLayer[],
-    getViewport : (layer: BaseLayer) => Omit<TileViewport, "tileBudget" | "level">,
+    getViewport : (layer: BaseLayer) => Omit<
+      TileViewport,
+      "tileBudget" | "currentLevel" | "forcedLevel"
+    >,
   ): void {
     for (const layer of layers) {
       const ds = this.states.get(layer.id);
@@ -178,23 +183,56 @@ export class ImagePipeline {
       if (ds.showingInitialTiles && ds.tileManager.hasVisibleTile()) {
         ds.showingInitialTiles = false;
       }
+      const frameViewport = getViewport(layer);
+      const showingInitial = ds.showingInitialTiles;
       const viewport: TileViewport = {
-        ...getViewport(layer),
+        ...frameViewport,
         tileBudget: pool.capacity - 1,
-        ...(ds.showingInitialTiles && ds.initialTileLevel !== undefined
-          ? { level: ds.initialTileLevel }
+        ...(!showingInitial && ds.automaticTileLevel !== undefined
+          ? { currentLevel: ds.automaticTileLevel }
+          : {}),
+        ...(showingInitial && ds.initialTileLevel !== undefined
+          ? { forcedLevel: ds.initialTileLevel }
           : {}),
       };
       const frame = layer.planTiles(viewport);
       if (!frame) continue;
-      ds.currentTileLevel = frame.plan.tiles[0]?.level ?? layer.getCurrentLevel();
-      ds.tileManager.commit(frame.plan, frame.loader);
+      const targetLevel = frame.plan.level;
+      if (!showingInitial) ds.automaticTileLevel = targetLevel;
+      const commit = ds.tileManager.commit(frame.plan, frame.loader);
+      const displayedLevel = commit.displayedLevel ?? targetLevel;
+      const sourceUnitsPerPixel = layer.getLevelResolution(displayedLevel);
+      if (sourceUnitsPerPixel !== undefined) {
+        ds.resolution = {
+          level                 : displayedLevel,
+          targetLevel,
+          sourceUnitsPerPixel,
+          viewportUnitsPerPixel : frameViewport.worldUnitsPerPixel,
+          unitsPerPixel         : Math.max(
+            sourceUnitsPerPixel,
+            frameViewport.worldUnitsPerPixel,
+          ),
+        };
+      }
     }
   }
 
-  /** Pyramid level selected for one layer in this view's latest frame. */
+  /** Pyramid level currently supplying visible pixels in this view. */
   getCurrentLevel(layerId: string): number | undefined {
-    return this.states.get(layerId)?.currentTileLevel;
+    return this.states.get(layerId)?.resolution?.level;
+  }
+
+  getResolution(layerId: string): ViewResolution | undefined {
+    const resolution = this.states.get(layerId)?.resolution;
+    return resolution ? { ...resolution } : undefined;
+  }
+
+  /** Recompute best fit on the next frame without discarding reusable tiles. */
+  resetResolutionSelection(): void {
+    for (const state of this.states.values()) {
+      state.automaticTileLevel = undefined;
+      state.resolution = undefined;
+    }
   }
 
   /**
@@ -459,7 +497,8 @@ export class ImagePipeline {
    */
   private resetTileResidency(ds: LayerRenderer): void {
     ds.tileManager?.reset();
-    ds.currentTileLevel = undefined;
+    ds.automaticTileLevel = undefined;
+    ds.resolution = undefined;
     ds.showingInitialTiles = ds.initialTileLevel !== undefined;
     ds.lastDataVersion  = ds.layer.dataVersion;
   }

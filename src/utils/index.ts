@@ -57,6 +57,7 @@ export {
   type TilePlacement,
   type TilePlan,
   type TileLoader,
+  type TileCommitResult,
   type TileBounds,
   type TileViewport,
   type PyramidLevelSelection,

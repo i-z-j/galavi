@@ -182,6 +182,20 @@ export interface ImagePyramid {
 
 // TODO: Implement OME-TIFF normalization in a separate adapter package that returns ImagePyramid.
 
+/** Resolution currently selected and displayed by one tiled layer in one view. */
+export interface ViewResolution {
+  /** Coarsest pyramid level currently supplying visible pixels. */
+  level                 : number;
+  /** Best-fit level currently requested by automatic selection. */
+  targetLevel           : number;
+  /** Physical units per source pixel/voxel at `level`. */
+  sourceUnitsPerPixel   : number;
+  /** Physical world units represented by one canvas pixel. */
+  viewportUnitsPerPixel : number;
+  /** Effective visible resolution: max(source, viewport), in physical units/px. */
+  unitsPerPixel         : number;
+}
+
 /** Data configuration */
 export interface Data {
   /** Source URL or path */
