@@ -22,9 +22,11 @@ import type { Galavi } from "../main";
 import {
   normalizeWheel,
   normalizeDrag,
+  type AxisMap,
 } from "../utils";
 import type { BaseControl } from "../control";
 import { BaseOverlay } from "../overlay";
+import { FUI_THEME } from "../overlay/theme";
 import { BaseLayer } from "../layer";
 
 // ============================================================================
@@ -111,6 +113,9 @@ export abstract class BaseView {
     getLayerIds: () => this.layerEntries.map((layer) => layer.id),
     getCanvas: () => this.canvas,
     isActive: () => this.isActive,
+    getAxisMap: () => this.getAxisMap(),
+    getTheme: () => this.galavi?.theme ?? FUI_THEME,
+    getOwner: () => this.galavi,
   };
 
   constructor(id: ID) {
@@ -533,6 +538,9 @@ export abstract class BaseView {
   }
 
   private _handleMouseDown(e: Event): void {
+    // First user input stops auto-rotate permanently.
+    this.galavi?.stopAutoRotate();
+
     const event = e as MouseEvent;
     this._dragging = true;
     this._lastX = event.clientX;
@@ -617,6 +625,9 @@ export abstract class BaseView {
   private _handleKeyDown(e: Event): void {
     const event = e as KeyboardEvent;
     if (event.repeat) return;
+
+    // First user input stops auto-rotate permanently.
+    this.galavi?.stopAutoRotate();
 
     this._pressedKeys.add(event.code);
 
@@ -737,8 +748,7 @@ export abstract class BaseView {
   }
 
   /** Return the axis permutation for this view, or undefined for 3D views. */
-  protected getAxisMap(): [number, number, number] | undefined {
+  protected getAxisMap(): AxisMap | undefined {
     return undefined;
   }
 }
-

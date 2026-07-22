@@ -5,18 +5,35 @@
  *
  * Overlays are presentational DOM elements bound to a live view. They MAY
  * read shared `State` in `onRender(state)` (e.g. the camera target to draw a
- * marker), and they own their view-local presentation state (visibility,
+ * crosshair), and they own their view-local presentation state (visibility,
  * styling, position). View-local presentation is NOT part of the portable
  * `State` document and does not round-trip through `getState()`.
+ *
+ * Theming: overlays render with the galavi FUI theme. `BaseOverlay` resolves
+ * the theme (global `GalaviConfig.theme` merged with the per-overlay `theme`
+ * option) and writes it as `--galavi-*` CSS custom properties on the overlay
+ * root; inline styles reference `var(--galavi-*)`.
  */
 
 import type { State } from "../types";
+import type { Galavi } from "../main";
+import type { AxisMap } from "../utils/axes";
+import {
+  applyThemeTo,
+  FUI_THEME,
+  mergeTheme,
+  type DeepPartial,
+  type GalaviTheme,
+} from "./theme";
 
 type OverlayBinding = {
   getViewType() : string;
   getLayerIds() : readonly string[];
   getCanvas()   : HTMLCanvasElement | undefined;
   isActive()    : boolean;
+  getAxisMap()  : AxisMap | undefined;
+  getTheme()    : GalaviTheme;
+  getOwner()    : Galavi | undefined;
 };
 
 export type OverlayCornerPosition = "top-left" | "top-right" | "bottom-left" | "bottom-right";
@@ -44,8 +61,12 @@ export abstract class BaseOverlay {
   private visible           = true;
   private visibleWhenActive = false;
 
+  private themePartial?  : DeepPartial<GalaviTheme>;
+  private resolvedTheme  : GalaviTheme = FUI_THEME;
+
   bindView(binding: OverlayBinding): void {
     this.binding = binding;
+    this.updateTheme();
   }
 
   mount(parent: HTMLElement): void {
@@ -63,6 +84,7 @@ export abstract class BaseOverlay {
     this.root   = root;
     this.hostEl = parent;
 
+    applyThemeTo(root, this.resolvedTheme);
     this.configureRoot(root);
     this.onMount(root, parent);
     this.syncVisibility();
@@ -91,11 +113,18 @@ export abstract class BaseOverlay {
   /**
    * Update view-local presentation options at runtime. Options not understood
    * by the base overlay are forwarded to `onOptionsChanged` for subclasses.
+   *
+   * Base options: `visible`, `visibleWhenActive`, and `theme` (a
+   * `DeepPartial<GalaviTheme>` merged over the global galavi theme).
    */
   setOptions(opts?: Record<string, unknown>): void {
     if (opts) {
       if (typeof opts.visible === "boolean") this.visible = opts.visible;
       if (typeof opts.visibleWhenActive === "boolean") this.visibleWhenActive = opts.visibleWhenActive;
+      if (opts.theme && typeof opts.theme === "object") {
+        this.themePartial = opts.theme as DeepPartial<GalaviTheme>;
+        this.updateTheme();
+      }
       this.onOptionsChanged(opts);
     }
     this.syncVisibility();
@@ -135,6 +164,21 @@ export abstract class BaseOverlay {
 
   protected isViewActive(): boolean {
     return this.binding?.isActive() ?? false;
+  }
+
+  /** Axis permutation of the bound view, or undefined for 3D views. */
+  protected getAxisMap(): AxisMap | undefined {
+    return this.binding?.getAxisMap();
+  }
+
+  /** The Galavi instance owning the bound view (e.g. for follow views). */
+  protected getOwner(): Galavi | undefined {
+    return this.binding?.getOwner();
+  }
+
+  /** The resolved theme (global galavi theme + per-overlay override). */
+  protected get theme(): GalaviTheme {
+    return this.resolvedTheme;
   }
 
   /**
@@ -189,42 +233,45 @@ export abstract class BaseOverlay {
   }
 
   protected applyLabelStyle(element: HTMLElement, variant: OverlayLabelVariant): void {
-    element.style.color       = "#fff";
-    element.style.fontFamily  = "ui-monospace, SFMono-Regular, Menlo, monospace";
-    element.style.fontSize    = "11px";
+    element.style.color       = "var(--galavi-text)";
+    element.style.fontFamily  = "var(--galavi-font-mono)";
+    element.style.fontSize    = "var(--galavi-font-size)";
     element.style.boxSizing   = "border-box";
 
     switch (variant) {
       case "panel":
-        element.style.background    = "rgba(10, 16, 28, 0.78)";
-        element.style.border        = "1px solid rgba(255, 255, 255, 0.12)";
+        element.style.background    = "var(--galavi-panel-bg)";
+        element.style.border        = "1px solid var(--galavi-border)";
         element.style.padding       = "8px 10px";
-        element.style.borderRadius  = "6px";
+        element.style.borderRadius  = "2px";
         element.style.fontWeight    = "500";
-        element.style.letterSpacing = "0.02em";
+        element.style.letterSpacing = "0.08em";
         element.style.lineHeight    = "1.4";
         element.style.whiteSpace    = "pre-line";
+        element.style.textTransform = "uppercase";
         break;
       case "tooltip":
-        element.style.background    = "rgba(0, 0, 0, 0.5)";
+        element.style.background    = "var(--galavi-panel-bg)";
         element.style.border        = "none";
         element.style.padding       = "3px 8px";
-        element.style.borderRadius  = "3px";
+        element.style.borderRadius  = "2px";
         element.style.fontWeight    = "400";
-        element.style.letterSpacing = "0.02em";
+        element.style.letterSpacing = "0.04em";
         element.style.lineHeight    = "1.4";
         element.style.whiteSpace    = "pre";
-        element.style.color         = "#ddd";
+        element.style.color         = "var(--galavi-text-dim)";
         break;
       default:
-        element.style.background    = "rgba(180, 40, 40, 0.7)";
-        element.style.border        = "none";
+        element.style.background    = "var(--galavi-panel-bg)";
+        element.style.border        = "1px solid var(--galavi-accent)";
         element.style.padding       = "3px 8px";
-        element.style.borderRadius  = "3px";
-        element.style.fontWeight    = "700";
-        element.style.letterSpacing = "0.5px";
+        element.style.borderRadius  = "2px";
+        element.style.fontWeight    = "600";
+        element.style.letterSpacing = "0.08em";
         element.style.lineHeight    = "1.2";
         element.style.whiteSpace    = "nowrap";
+        element.style.color         = "var(--galavi-accent)";
+        element.style.textTransform = "uppercase";
         break;
     }
   }
@@ -258,6 +305,13 @@ export abstract class BaseOverlay {
       Math.min(Math.max(margin, left), maxLeft),
       Math.min(Math.max(margin, top), maxTop),
     ];
+  }
+
+  /** Resolve global binding theme + per-overlay override and (re)apply to root. */
+  private updateTheme(): void {
+    const base = this.binding?.getTheme() ?? FUI_THEME;
+    this.resolvedTheme = mergeTheme(base, this.themePartial);
+    if (this.root) applyThemeTo(this.root, this.resolvedTheme);
   }
 
   private syncVisibility(): void {

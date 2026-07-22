@@ -48,9 +48,30 @@ export {
 } from "./registry";
 
 export { BaseControl } from "./control";
-export { BaseOverlay } from "./overlay";
+export {
+  BaseOverlay,
+  CrosshairOverlay,
+  RulerOverlay,
+  RoiSelectorOverlay,
+  MagnifierOverlay,
+  FoldablePanelOverlay,
+  type RoiBox,
+  type RoiChangeCallback,
+  type OverlayCornerPosition,
+  type OverlayLabelVariant,
+} from "./overlay";
 export { BaseLayer } from "./layer";
 export { BaseView } from "./view";
+
+// === Theme ===
+export {
+  FUI_THEME,
+  resolveTheme,
+  mergeTheme,
+  applyThemeTo,
+  type GalaviTheme,
+  type DeepPartial,
+} from "./overlay/theme";
 
 // === Utils (public extension API) ===
 //

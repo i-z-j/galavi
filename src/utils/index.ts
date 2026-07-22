@@ -68,3 +68,39 @@ export {
   normalizeWheel,
   normalizeDrag,
 } from "./input";
+
+// Projection (physical ↔ screen)
+export {
+  physicalToSliceScreen,
+  screenToSlicePhysical,
+  physicalToVolumeScreen,
+  screenToVolumeTargetPlane,
+  sliceUnitsPerPixel,
+  volumeUnitsPerPixel,
+} from "./projection";
+
+// Anatomical orientation (biomedical axis metadata)
+export {
+  parseAnatomicalOrientation,
+  buildSliceOrientations,
+  canonicalToStorageIndex,
+  type StorageAxis,
+  type StorageAxisName,
+  type AnatomicalAxis,
+  type AnatomicalDirection,
+  type OrientationSign,
+  type SlicePlane,
+  type OrientedSlicePlane,
+  type OrientedAxis,
+  type AnatomicalOrientation,
+} from "./anatomical-orientation";
+
+// Channel colors and contrast limits (biomedical)
+export {
+  CHANNEL_FALLBACK_COLORS,
+  CONTRAST_RANGE,
+  normalizeHexColor,
+  getChannelColor,
+  clampContrastLimits,
+  buildContrastLimits,
+} from "./channels";

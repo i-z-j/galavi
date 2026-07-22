@@ -3,18 +3,18 @@
  *
  * Renders a small overview of the scene with a fixed target on the
  * surface center, fixed framing distance, and an orientation that
- * follows the unified camera. Hosts an internal PlanesLayer for
- * spatial-context glass planes.
+ * follows the unified camera. Target/center indication is provided by
+ * the crosshair overlay (3-axis mode) when configured on the view.
  */
 
-import type { State, ID, Vec3 } from "../types";
+import type { State, Vec3 } from "../types";
 import { computePosition, cameraAngles } from "../utils";
 import {
   DEPTH_FORMAT,
   DEFAULT_FOV,
   NAVIGATOR_FRAMING_MARGIN
 } from "../defaults";
-import { BaseLayer, PlanesLayer } from "../layer";
+import { BaseLayer } from "../layer";
 import {
   BaseView,
   SCENE_UNIFORM_SIZE,
@@ -34,18 +34,6 @@ export class NavigatorView extends BaseView {
   private surfaceCenter?    : Vec3;
   private fixedDistance?    : number;
   private maxSurfaceExtent? : number;
-
-  /** Internal reference planes — not part of layerEntries. */
-  private planesData: PlanesLayer;
-
-  constructor(id: ID) {
-    super(id);
-    this.planesData = new PlanesLayer(`${id}-planes`, {
-      surfaceCenter: [0.5, 0.5, 0.5],
-      size         : 0.04,
-      opacity      : 0.2,
-    });
-  }
 
   protected async initGPUResources(): Promise<void> {
     this.cameraBuffer = this.device.createBuffer({
@@ -90,10 +78,10 @@ export class NavigatorView extends BaseView {
     // Only feed ready layers to the pipeline; skipping prevents zero-byte
     // vertex buffers while a surface is still loading.
     const readyEntries  = this.layerEntries.filter((l) => l.isReady);
-    const drawables: BaseLayer[] = [...readyEntries, this.planesData];
+    const drawables: BaseLayer[] = [...readyEntries];
 
-    // Refresh planes + framing from the world AABB of ready entries.
-    this.refreshPlanesAndFraming();
+    // Refresh framing from the world AABB of ready entries.
+    this.refreshFraming();
 
     this.pipeline.sync(drawables);
 
@@ -116,9 +104,6 @@ export class NavigatorView extends BaseView {
       near    : ext * 0.001,
       far     : ext * 10,
     };
-
-    // Reference planes follow the unified slice target.
-    this.planesData.setSliceTarget(cam.target);
 
     const aspect     = this.canvas.width / this.canvas.height;
     const cameraData = this.createPerspectiveUniforms(camera, aspect);
@@ -160,15 +145,12 @@ export class NavigatorView extends BaseView {
     this.device.queue.submit([encoder.finish()]);
   }
 
-  /** Update reference plane size/center and lazy-init framing from the scene AABB. */
-  private refreshPlanesAndFraming(): void {
+  /** Lazy-init framing from the scene AABB. */
+  private refreshFraming(): void {
     const scene = this.getSceneBounds();
     if (!isFinite(scene.min[0])) return;
 
     const maxDim = scene.maxExtent;
-    this.planesData.setSize(maxDim * 0.45);
-    this.planesData.setSurfaceCenter(this.surfaceCenter ?? scene.center);
-
     if (!this.isCentered) {
       this.surfaceCenter    = scene.center;
       this.fixedDistance    = (maxDim / 2) / Math.tan(DEFAULT_FOV / 2) * NAVIGATOR_FRAMING_MARGIN;

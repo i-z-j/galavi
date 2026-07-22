@@ -20,8 +20,7 @@ export {
 	type VertexAttribute,
 } from "./base";
 
-// Concrete layer classes — consumed by registry.ts and (where applicable)
-// directly by views (e.g. NavigatorView holds an internal PlanesLayer).
+// Concrete layer classes — consumed by registry.ts and views.
 // Layer-internal helper types stay private to each layer subfolder.
 export { VolumeLayer,       type VolumeConfig       } from "./volume/main";
 export { SliceLayer,        type SliceConfig        } from "./slice/main";
@@ -32,4 +31,3 @@ export { SegmentationLayer, type SegmentationConfig } from "./segmentation/main"
 export { VectorsLayer,      type VectorsConfig      } from "./vectors/main";
 export { TracksLayer,       type TracksConfig       } from "./tracks/main";
 export { NetworkLayer,      type NetworkConfig      } from "./network/main";
-export { PlanesLayer,       type PlanesConfig       } from "./planes/main";

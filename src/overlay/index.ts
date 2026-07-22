@@ -2,7 +2,14 @@
  * Overlay Module
  */
 
-export { BaseOverlay, type OverlayClass } from "./base";
-export { ScaleBarOverlay } from "./scalebar";
-export { TextOverlay } from "./text";
-export { MarkerOverlay } from "./marker";
+export {
+  BaseOverlay,
+  type OverlayClass,
+  type OverlayCornerPosition,
+  type OverlayLabelVariant,
+} from "./base";
+export { CrosshairOverlay } from "./crosshair";
+export { RulerOverlay } from "./ruler";
+export { RoiSelectorOverlay, type RoiBox, type RoiChangeCallback } from "./roi-selector";
+export { MagnifierOverlay } from "./magnifier";
+export { FoldablePanelOverlay } from "./foldable-panel";

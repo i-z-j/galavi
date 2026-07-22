@@ -20,6 +20,7 @@ import type {
   ViewResolution,
 } from "./types";
 import {
+  AUTO_ROTATE_SPEED_DEG_PER_SEC,
   DEFAULT_CAMERA_NAV_MODE,
   DEFAULT_CAMERA_PROJ_MODE,
   DEFAULT_EXPLORATION,
@@ -30,6 +31,7 @@ import {
 } from "./view";
 import { createView, type ViewRuntime } from "./view/runtime";
 import type { BaseLayer } from "./layer";
+import { resolveTheme, type GalaviTheme } from "./overlay/theme";
 import { cameraDistance, cameraAngles, computePosition, computeForward } from "./utils";
 import { vec3 } from "wgpu-matrix";
 
@@ -54,6 +56,9 @@ type ViewAccessor = {
 };
 
 export class Galavi {
+  /** Resolved overlay UI theme (`GalaviConfig.theme` over the FUI defaults). */
+  readonly theme: GalaviTheme;
+
   private _exploration  : Exploration;
   private _layers       : LayerConfig[];
   private _physical?    : PhysicalSpace;
@@ -66,11 +71,18 @@ export class Galavi {
   private _pendingRenderState? : State;
   private _renderFrameId?      : number;
 
+  private _autoRotateActive   = false;
+  private _autoRotateSpeedDeg = AUTO_ROTATE_SPEED_DEG_PER_SEC;
+  private _autoRotateFrameId? : number;
+  private _autoRotateLastTs   = 0;
+
   // ====================================================================
   // CONSTRUCTOR
   // ====================================================================
 
   constructor(config: GalaviConfig) {
+    this.theme = resolveTheme(config.theme);
+
     // Initialize State
     const initial = normalizeInitialState(config.state ?? DEFAULT_STATE);
     this._physical    = initial.physical;
@@ -80,6 +92,16 @@ export class Galavi {
     // Create Views
     for (const [name, vc] of Object.entries(config.views)) {
       this._views.set(name, createView(name, vc, this._layers, this));
+    }
+
+    // Auto-rotate: enabled by the first volume view that opts in.
+    for (const vc of Object.values(config.views)) {
+      if (vc.type !== "volume" || !vc.autoRotate) continue;
+      this._autoRotateActive = true;
+      if (typeof vc.autoRotate === "object" && typeof vc.autoRotate.speedDegPerSec === "number") {
+        this._autoRotateSpeedDeg = vc.autoRotate.speedDegPerSec;
+      }
+      break;
     }
   }
 
@@ -357,6 +379,7 @@ export class Galavi {
     if (!this._device) await this.initGPU();
     await vr.view.mount(canvas);
     this.requestRender();
+    if (this._autoRotateActive) this.startAutoRotate();
   }
 
   async mountAll(canvases: Record<ID, HTMLCanvasElement>): Promise<void> {
@@ -367,6 +390,7 @@ export class Galavi {
       await vr.view.mount(canvas);
     }
     this.scheduleRender(this.getState());
+    if (this._autoRotateActive) this.startAutoRotate();
   }
 
   unmount(viewId: ID): void {
@@ -376,10 +400,60 @@ export class Galavi {
   }
 
   // ====================================================================
+  // AUTO-ROTATE
+  // ====================================================================
+
+  /**
+   * Idle camera spin for volume views (`ViewConfig.autoRotate`). Advances the
+   * camera yaw through the normal commit path, so subscribers and overlays
+   * observe the same state flow as an interactive orbit drag (same update
+   * rate). Stops permanently on the first user input via `stopAutoRotate()`.
+   */
+  private startAutoRotate(): void {
+    if (this._autoRotateFrameId !== undefined) return;
+    this._autoRotateLastTs = performance.now();
+
+    const tick = (ts: number) => {
+      if (!this._autoRotateActive) {
+        this._autoRotateFrameId = undefined;
+        return;
+      }
+      const dt = Math.min((ts - this._autoRotateLastTs) / 1000, 0.1);
+      this._autoRotateLastTs = ts;
+
+      const state = this.getState();
+      const cam   = state.exploration.camera;
+      const dist  = cameraDistance(cam);
+      const { yaw, pitch } = cameraAngles(cam);
+      cam.position = computePosition(
+        cam.target,
+        dist,
+        yaw + (this._autoRotateSpeedDeg * Math.PI / 180) * dt,
+        pitch,
+      );
+      this._commit(state);
+
+      this._autoRotateFrameId = requestAnimationFrame(tick);
+    };
+
+    this._autoRotateFrameId = requestAnimationFrame(tick);
+  }
+
+  /** Stop auto-rotate permanently. Called by views on first user input. */
+  stopAutoRotate(): void {
+    this._autoRotateActive = false;
+    if (this._autoRotateFrameId !== undefined) {
+      cancelAnimationFrame(this._autoRotateFrameId);
+      this._autoRotateFrameId = undefined;
+    }
+  }
+
+  // ====================================================================
   // CLEANUP
   // ====================================================================
 
   destroy(): void {
+    this.stopAutoRotate();
     if (this._renderFrameId !== undefined) {
       cancelAnimationFrame(this._renderFrameId);
       this._renderFrameId = undefined;

@@ -54,6 +54,9 @@ export const VOLUME_STEP_SIZE = 0.008;
 /** Approximate samples across one viewport axis; caps useful 3D resolution. */
 export const VOLUME_RAY_SAMPLE_COUNT = Math.floor(1 / VOLUME_STEP_SIZE);
 
+/** Default auto-rotate speed (degrees per second) for volume views. */
+export const AUTO_ROTATE_SPEED_DEG_PER_SEC = 20;
+
 // ============================================================================
 // INTERACTION CONSTANTS
 // ============================================================================

@@ -2,6 +2,8 @@
  * Galavi Type Definitions
  */
 
+import type { DeepPartial, GalaviTheme } from "./overlay/theme";
+
 // ============================================================================
 // PRIMITIVES
 // ============================================================================
@@ -27,6 +29,8 @@ export interface GalaviConfig {
   state : State;
   /** View configurations keyed by view name */
   views : Record<string, ViewConfig>;
+  /** Overlay UI theme override, merged over the built-in FUI theme */
+  theme?: DeepPartial<GalaviTheme>;
 }
 
 /**
@@ -61,12 +65,18 @@ export interface ViewConfig {
   layers        : ID[];
   /** Controls to attach, keyed by control type (e.g. { orbit: {}, fly: {} }) */
   controls?     : Record<string, Record<string, unknown>>;
-  /** Overlays to attach, keyed by overlay type (e.g. { scalebar: {}, marker: { visible: false } }) */
+  /** Overlays to attach, keyed by overlay type (e.g. { crosshair: {}, ruler: { visible: false } }) */
   overlays?     : Record<string, Record<string, unknown>>;
   /** Human-readable label for this view */
   label?        : string;
   /** Whether this view can become the active view (default: true) */
   activatable?  : boolean;
+  /**
+   * Auto-rotate the unified camera (volume views). `true` spins at the default
+   * speed; `{ speedDegPerSec }` overrides it. Stops permanently on the first
+   * user input (mouse down / key down).
+   */
+  autoRotate?   : boolean | { speedDegPerSec?: number };
 }
 
 // ===========================================================================
@@ -123,7 +133,7 @@ export interface SpatialConfig {
   size        : Vec3;
   /** Physical unit (default 'µm') */
   unit?       : PhysicalUnit | (string & {});
-  /** Voxel size [x,y,z] in physical units (for resolution selection, scalebar) */
+  /** Voxel size [x,y,z] in physical units (for resolution selection, ruler) */
   spacing?    : Vec3;
   /** Physical coordinate of voxel [0,0,0] (default [0,0,0]) */
   origin?     : Vec3;

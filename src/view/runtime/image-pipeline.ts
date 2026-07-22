@@ -73,7 +73,7 @@ export interface ImagePipelineOpts {
   /**
    * Sampler bound at group(0) binding 3 for tile textures.
    * Required if any layer in this view is tiled; optional otherwise
-   * (e.g. NavigatorView, which only renders shape/planes).
+   * (e.g. NavigatorView, which only renders untiled layers).
    */
   textureSampler?      : GPUSampler;
   /**
@@ -439,7 +439,7 @@ export class ImagePipeline {
       };
     }
 
-    // Non-tiled overlay (surfaces, shapes, points, vectors, planes, ...)
+    // Non-tiled overlay (surfaces, shapes, points, vectors, ...)
     const bindEntries: GPUBindGroupEntry[] = [
       { binding: 0, resource: { buffer: cameraBuffer } },
       { binding: 1, resource: { buffer: paramsBuffer } },

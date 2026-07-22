@@ -36,7 +36,7 @@ export class SliceView extends BaseView {
     return this._axisMap;
   }
 
-  protected override getAxisMap(): [number, number, number] | undefined {
+  protected override getAxisMap(): AxisMap | undefined {
     return this.axisMap;
   }
 

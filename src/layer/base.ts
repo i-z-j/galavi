@@ -57,7 +57,7 @@ export interface Shader {
    * Bind-group requirements for this shader. The view's image pipeline reads
    * these to decide which uniforms to allocate and bind. Defaults treat the
    * shader as needing a model-matrix uniform at group(0) binding 2 (overridable
-   * by per-layer shaders that don't transform geometry, e.g. `planes`).
+   * by per-layer shaders that don't transform geometry).
    */
   bindings? : ShaderBindings;
 }
@@ -217,7 +217,7 @@ export abstract class BaseLayer {
 
   /**
    * Returns bounding box in world space. Layers without intrinsic geometry
-   * bounds (points / vectors / shapes / planes / segmentation / network /
+   * bounds (points / vectors / shapes / segmentation / network /
    * tracks / slice) return `undefined` so view scene-bounds logic skips them.
    * Layers with real bounds (e.g. SurfaceLayer, VolumeLayer) override.
    */

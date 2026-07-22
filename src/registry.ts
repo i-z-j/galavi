@@ -28,9 +28,11 @@ import {
 } from "./control";
 import {
   BaseOverlay,
-  ScaleBarOverlay,
-  TextOverlay,
-  MarkerOverlay,
+  CrosshairOverlay,
+  RulerOverlay,
+  RoiSelectorOverlay,
+  MagnifierOverlay,
+  FoldablePanelOverlay,
   type OverlayClass,
 } from "./overlay";
 import {
@@ -130,7 +132,7 @@ const getControlClasses = (): readonly ControlClass[] => [
   OrbitControl, FlyControl, PanZoomControl,
 ];
 const getOverlayClasses = (): readonly OverlayClass[] => [
-  ScaleBarOverlay, TextOverlay, MarkerOverlay,
+  CrosshairOverlay, RulerOverlay, RoiSelectorOverlay, MagnifierOverlay, FoldablePanelOverlay,
 ];
 const getViewClasses    = (): readonly ViewClass[]    => [
   VolumeView, SliceView, NavigatorView,
