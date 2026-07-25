@@ -56,7 +56,11 @@ export {
   MagnifierOverlay,
   FoldablePanelOverlay,
   type RoiBox,
-  type RoiChangeCallback,
+  type RoiChangeKind,
+  type RoiChangePhase,
+  type RoiSelectionChange,
+  type RoiSelectionsChangeCallback,
+  type RoiActiveIndexChangeCallback,
   type OverlayCornerPosition,
   type OverlayLabelVariant,
 } from "./overlay";
@@ -66,6 +70,7 @@ export { BaseView } from "./view";
 // === Theme ===
 export {
   FUI_THEME,
+  PRECISION_THEME,
   resolveTheme,
   mergeTheme,
   applyThemeTo,

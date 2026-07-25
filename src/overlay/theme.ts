@@ -51,6 +51,19 @@ export const FUI_THEME: GalaviTheme = {
   fontSize    : "11px",
 };
 
+/** Precision theme — monochrome, low-decoration chrome for analytical work. */
+export const PRECISION_THEME: GalaviTheme = {
+  accent      : "#F5F5F5",
+  accentSoft  : "rgba(255, 255, 255, 0.10)",
+  warn        : "#FFFFFF",
+  text        : "#F4F4F4",
+  textDim     : "#A3A3A3",
+  panelBg     : "rgba(0, 0, 0, 0.90)",
+  border      : "rgba(255, 255, 255, 0.36)",
+  fontMono    : "IBM Plex Mono, SFMono-Regular, Menlo, Consolas, monospace",
+  fontSize    : "11px",
+};
+
 export type DeepPartial<T> = {
   [K in keyof T]?: T[K] extends object ? DeepPartial<T[K]> : T[K];
 };

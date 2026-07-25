@@ -36,7 +36,7 @@ function dot(first: Vec3, second: Vec3): number {
   return first[0] * second[0] + first[1] * second[1] + first[2] * second[2];
 }
 
-function cameraBasis(camera: Camera): { forward: Vec3; right: Vec3; up: Vec3 } {
+function cameraBasis(camera: { position: Vec3; target: Vec3; up?: Vec3 }): { forward: Vec3; right: Vec3; up: Vec3 } {
   const forward = normalize([
     camera.target[0] - camera.position[0],
     camera.target[1] - camera.position[1],
@@ -106,9 +106,10 @@ export function sliceUnitsPerPixel(state: State, viewportHeight: number): number
  */
 export function physicalToVolumeScreen(
   position : Vec3,
-  camera   : Camera,
+  camera   : { position: Vec3; target: Vec3; up?: Vec3 },
   width    : number,
   height   : number,
+  fov      = DEFAULT_FOV,
 ): Vec2 | null {
   const { forward, right, up } = cameraBasis(camera);
   const relative: Vec3 = [
@@ -118,7 +119,7 @@ export function physicalToVolumeScreen(
   ];
   const depth = dot(relative, forward);
   if (depth <= 1e-6) return null;
-  const halfHeight = Math.max(depth * HALF_FOV_TAN, 1e-6);
+  const halfHeight = Math.max(depth * Math.tan(fov / 2), 1e-6);
   const halfWidth  = halfHeight * width / Math.max(height, 1);
   const clipX      = dot(relative, right) / halfWidth;
   const clipY      = -dot(relative, up) / halfHeight;

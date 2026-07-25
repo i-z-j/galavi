@@ -190,7 +190,7 @@ export class Galavi {
   /** Subscribe to state changes. Returns an unsubscribe function. */
   subscribe(callback: (state: State) => void): () => void {
     this._subscribers.add(callback);
-    return () => this._subscribers.delete(callback);
+    return () => { this._subscribers.delete(callback); };
   }
 
   // ====================================================================
@@ -462,6 +462,10 @@ export class Galavi {
     for (const vr of this._views.values()) {
       vr.view.destroy();
     }
+    // Release the GPU device itself — destroyed Galavi instances must not
+    // keep counting against the browser's per-page WebGPU device limit.
+    this._device?.destroy();
+    this._device = undefined;
   }
 }
 

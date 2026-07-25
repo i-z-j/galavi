@@ -1,31 +1,30 @@
 /**
- * RoiSelectorOverlay — 3D box region-of-interest overlay.
+ * RoiSelectorOverlay — multiple 3D box region-of-interest overlay.
  *
  * One overlay with two presentations chosen by the bound view type:
  *
  * - Slice views (an AxisMap is present): interactive editor for the in-plane
- *   (u/v) extents of the box. Dragging on empty space creates a new box whose
+ *   (u/v) extents of a box. Dragging on empty space adds a box whose
  *   slice-axis extent spans the full physical range of that axis; dragging
  *   the body moves the box; dragging a corner handle resizes it. Edits only
  *   touch the two in-plane axes (the slice-axis extent is preserved) and are
- *   clamped to the physical bounding box. A range label with a
+ *   clamped to the physical bounding box. A three-line range label with a
  *   copy-to-clipboard button is shown next to the rect.
  * - Volume / navigator views: read-only 12-edge wireframe of the box,
  *   projected with the perspective camera; edges with an endpoint behind
  *   the camera are skipped.
  *
- * The box itself is owned by the host app: it arrives via the `roi` option
- * and edits are reported through the `onRoiChange` callback (live during
- * drags and once more on pointerup). Accepted edits are also mirrored
- * internally so the overlay stays consistent when the app does not echo
- * the `roi` option back.
+ * The boxes are owned by the host app: they arrive via the `rois` option and
+ * edits are reported through `onRoisChange` (live during drags and once more
+ * on pointerup). Accepted edits are mirrored internally so the overlay stays
+ * consistent when the app does not echo options back immediately.
  *
  * Options:
- * - `roi`         — `{ min: Vec3; max: Vec3 } | null`, physical units.
- * - `enabled`     — slice-view editing (default true); false = display-only.
- * - `unit`        — label unit override (default `state.physical.spatial.unit`
- *                   or "µm").
- * - `onRoiChange` — `(roi: { min: Vec3; max: Vec3 }) => void`.
+ * - `rois`                — `{ min: Vec3; max: Vec3 }[]`, physical units.
+ * - `activeIndex`         — box currently exposing edit handles, or null.
+ * - `enabled`             — slice editing (default true); false = display-only.
+ * - `onRoisChange`        — receives the full array plus change metadata.
+ * - `onActiveIndexChange` — receives the box activated by a body click.
  */
 
 import type { State, Vec3 } from "../types";
@@ -38,18 +37,24 @@ import {
 import { BaseOverlay } from "./base";
 
 export type RoiBox = { min: Vec3; max: Vec3 };
-export type RoiChangeCallback = (roi: RoiBox) => void;
+export type RoiChangeKind = "create" | "move" | "resize" | "remove";
+export type RoiChangePhase = "live" | "commit";
+export interface RoiSelectionChange {
+  index : number;
+  kind  : RoiChangeKind;
+  phase : RoiChangePhase;
+}
+export type RoiSelectionsChangeCallback = (rois: RoiBox[], change: RoiSelectionChange) => void;
+export type RoiActiveIndexChangeCallback = (activeIndex: number | null) => void;
 
 type AxisSide = "min" | "max";
 
 type DragState =
-  | { kind: "create"; start: Vec3; previous: RoiBox | null }
-  | { kind: "move"; start: Vec3; original: RoiBox }
-  | { kind: "resize"; uSide: AxisSide; vSide: AxisSide; original: RoiBox };
+  | { kind: "create"; index: number; start: Vec3; previousActive: number | null }
+  | { kind: "move"; index: number; start: Vec3; original: RoiBox }
+  | { kind: "resize"; index: number; uSide: AxisSide; vSide: AxisSide; original: RoiBox };
 
-interface RoiSelectorElements {
-  svg         : SVGSVGElement;
-  surface     : SVGRectElement;
+interface RoiSelectionElements {
   sliceLayer  : SVGGElement;
   body        : SVGRectElement;
   handles     : SVGRectElement[];
@@ -57,6 +62,13 @@ interface RoiSelectorElements {
   edges       : SVGLineElement[];
   label       : HTMLDivElement;
   labelText   : HTMLSpanElement;
+  removeButton: HTMLButtonElement;
+}
+
+interface RoiSelectorElements {
+  svg        : SVGSVGElement;
+  surface    : SVGRectElement;
+  selections: RoiSelectionElements[];
 }
 
 const SVG_NS      = "http://www.w3.org/2000/svg";
@@ -95,9 +107,8 @@ function isVec3(value: unknown): value is Vec3 {
   );
 }
 
-/** Parse the untyped `roi` option: a normalized RoiBox, null, or undefined (leave unchanged). */
-function parseRoi(value: unknown): RoiBox | null | undefined {
-  if (value === null) return null;
+/** Parse an untyped box option into normalized physical ranges. */
+function parseRoi(value: unknown): RoiBox | undefined {
   if (typeof value !== "object" || value === null) return undefined;
   const candidate = value as { min?: unknown; max?: unknown };
   if (!isVec3(candidate.min) || !isVec3(candidate.max)) return undefined;
@@ -113,8 +124,18 @@ function parseRoi(value: unknown): RoiBox | null | undefined {
   return { min, max };
 }
 
+function parseRois(value: unknown): RoiBox[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const rois = value.map(parseRoi);
+  return rois.every((roi): roi is RoiBox => Boolean(roi)) ? rois : undefined;
+}
+
 function cloneRoi(roi: RoiBox): RoiBox {
   return { min: [...roi.min], max: [...roi.max] };
+}
+
+function cloneRois(rois: readonly RoiBox[]): RoiBox[] {
+  return rois.map(cloneRoi);
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -143,11 +164,12 @@ function physicalBounds(state: State): RoiBox {
 export class RoiSelectorOverlay extends BaseOverlay {
   static readonly overlayType = "roiselector";
 
-  private roi     : RoiBox | null = null;
-  private enabled = true;
-  private unit?   : string;
+  private rois        : RoiBox[] = [];
+  private activeIndex : number | null = null;
+  private enabled     = true;
 
-  private onRoiChange?: RoiChangeCallback;
+  private onRoisChange?       : RoiSelectionsChangeCallback;
+  private onActiveIndexChange?: RoiActiveIndexChangeCallback;
 
   private drag   : DragState | null = null;
   private state? : State;
@@ -170,6 +192,7 @@ export class RoiSelectorOverlay extends BaseOverlay {
     svg.style.height    = "100%";
     svg.style.display   = "block";
     svg.style.overflow  = "hidden";
+    svg.addEventListener("wheel", this.handleWheel, { passive: false });
     root.appendChild(svg);
 
     // Full-viewport interaction surface (slice views only).
@@ -185,57 +208,51 @@ export class RoiSelectorOverlay extends BaseOverlay {
     surface.addEventListener("mousedown", stopPropagation);
     svg.appendChild(surface);
 
-    // Slice presentation: box rect + corner handles.
+    this.els = { svg, surface, selections: [] };
+  }
+
+  private createSelectionElements(root: HTMLDivElement, svg: SVGSVGElement): RoiSelectionElements {
     const sliceLayer = document.createElementNS(SVG_NS, "g");
     sliceLayer.style.display = "none";
     svg.appendChild(sliceLayer);
 
     const body = document.createElementNS(SVG_NS, "rect");
     body.style.fill          = "var(--galavi-accent-soft)";
-    body.style.stroke        = "var(--galavi-warn)";
+    body.style.stroke        = "var(--galavi-accent)";
     body.style.strokeWidth   = "1px";
-    body.style.cursor        = "move";
-    body.style.pointerEvents = "none"; // toggled per frame in onRender
-    body.addEventListener("pointerdown", this.handleBodyPointerDown);
-    body.addEventListener("mousedown", stopPropagation);
+    body.style.pointerEvents = "none";
     sliceLayer.appendChild(body);
 
-    const handles = HANDLE_CORNERS.map((corner) => {
+    const handles = HANDLE_CORNERS.map(() => {
       const handle = document.createElementNS(SVG_NS, "rect");
       handle.setAttribute("width", `${HANDLE_SIZE}`);
       handle.setAttribute("height", `${HANDLE_SIZE}`);
       handle.style.fill          = "var(--galavi-panel-bg)";
-      handle.style.stroke        = "var(--galavi-warn)";
+      handle.style.stroke        = "var(--galavi-accent)";
       handle.style.strokeWidth   = "1px";
       handle.style.cursor        = "crosshair";
       handle.style.pointerEvents = "auto";
-      handle.addEventListener("pointerdown", (event) => this.startResize(corner, event));
-      handle.addEventListener("mousedown", stopPropagation);
       sliceLayer.appendChild(handle);
       return handle;
     });
 
-    // Volume presentation: 12-edge wireframe.
     const volumeLayer = document.createElementNS(SVG_NS, "g");
     volumeLayer.style.display = "none";
     svg.appendChild(volumeLayer);
-
     const edges = EDGE_PAIRS.map(() => {
       const edge = document.createElementNS(SVG_NS, "line");
-      edge.style.stroke      = "var(--galavi-warn)";
+      edge.style.stroke      = "var(--galavi-accent)";
       edge.style.strokeWidth = "1px";
       volumeLayer.appendChild(edge);
       return edge;
     });
 
-    // Range label + copy button.
     const label = this.createLabel("tooltip");
     label.style.position      = "absolute";
     label.style.display       = "none";
-    label.style.alignItems    = "center";
+    label.style.alignItems    = "flex-start";
     label.style.gap           = "6px";
     label.style.pointerEvents = "none";
-
     const labelText = document.createElement("span");
     label.appendChild(labelText);
 
@@ -243,25 +260,70 @@ export class RoiSelectorOverlay extends BaseOverlay {
     copyButton.type = "button";
     copyButton.title = "Copy physical range";
     copyButton.setAttribute("aria-label", "Copy physical range");
-    copyButton.innerHTML             = COPY_ICON_SVG;
-    copyButton.style.display         = "inline-flex";
-    copyButton.style.alignItems      = "center";
-    copyButton.style.justifyContent  = "center";
-    copyButton.style.width           = "18px";
-    copyButton.style.height          = "16px";
-    copyButton.style.padding         = "0";
-    copyButton.style.border          = "none";
-    copyButton.style.background      = "transparent";
-    copyButton.style.color           = "var(--galavi-text-dim)";
-    copyButton.style.cursor          = "pointer";
-    copyButton.style.pointerEvents   = "auto";
-    copyButton.addEventListener("pointerdown", stopPropagation);
-    copyButton.addEventListener("mousedown", stopPropagation);
-    copyButton.addEventListener("click", () => { void this.copyRange(); });
+    copyButton.innerHTML            = COPY_ICON_SVG;
+    copyButton.style.display        = "inline-flex";
+    copyButton.style.alignItems     = "center";
+    copyButton.style.justifyContent = "center";
+    copyButton.style.width          = "18px";
+    copyButton.style.height         = "16px";
+    copyButton.style.padding        = "0";
+    copyButton.style.border         = "none";
+    copyButton.style.background     = "transparent";
+    copyButton.style.color          = "var(--galavi-text-dim)";
+    copyButton.style.cursor         = "pointer";
+    copyButton.style.pointerEvents  = "auto";
     label.appendChild(copyButton);
     root.appendChild(label);
 
-    this.els = { svg, surface, sliceLayer, body, handles, volumeLayer, edges, label, labelText };
+    const removeButton = document.createElement("button");
+    removeButton.type = "button";
+    removeButton.title = "Remove selection";
+    removeButton.setAttribute("aria-label", "Remove selection");
+    removeButton.textContent            = "-";
+    removeButton.style.position         = "absolute";
+    removeButton.style.display          = "none";
+    removeButton.style.width            = "18px";
+    removeButton.style.height           = "18px";
+    removeButton.style.padding          = "0";
+    removeButton.style.border           = "1px solid var(--galavi-accent)";
+    removeButton.style.borderRadius     = "2px";
+    removeButton.style.background       = "var(--galavi-panel-bg)";
+    removeButton.style.color            = "var(--galavi-accent)";
+    removeButton.style.font             = "600 14px/1 var(--galavi-font-mono)";
+    removeButton.style.cursor           = "pointer";
+    removeButton.style.pointerEvents    = "auto";
+    root.appendChild(removeButton);
+
+    const selection = { sliceLayer, body, handles, volumeLayer, edges, label, labelText, removeButton };
+    body.addEventListener("pointerdown", (event) => this.handleBodyPointerDown(selection, event));
+    body.addEventListener("mousedown", stopPropagation);
+    handles.forEach((handle, index) => {
+      handle.addEventListener("pointerdown", (event) => this.startResize(selection, HANDLE_CORNERS[index], event));
+      handle.addEventListener("mousedown", stopPropagation);
+    });
+    copyButton.addEventListener("pointerdown", stopPropagation);
+    copyButton.addEventListener("mousedown", stopPropagation);
+    copyButton.addEventListener("click", () => { void this.copyRange(selection); });
+    removeButton.addEventListener("pointerdown", stopPropagation);
+    removeButton.addEventListener("mousedown", stopPropagation);
+    removeButton.addEventListener("click", (event) => this.removeSelection(selection, event));
+    return selection;
+  }
+
+  private ensureSelectionElements(count: number): void {
+    const els = this.els;
+    const root = this.root;
+    if (!els || !root) return;
+    while (els.selections.length < count) {
+      els.selections.push(this.createSelectionElements(root, els.svg));
+    }
+    while (els.selections.length > count) {
+      const selection = els.selections.pop();
+      selection?.sliceLayer.remove();
+      selection?.volumeLayer.remove();
+      selection?.label.remove();
+      selection?.removeButton.remove();
+    }
   }
 
   protected override onUnmount(): void {
@@ -272,12 +334,20 @@ export class RoiSelectorOverlay extends BaseOverlay {
   }
 
   protected override onOptionsChanged(opts: Record<string, unknown>): void {
-    const roi = parseRoi(opts.roi);
-    if (roi !== undefined) this.roi = roi;
+    const rois = parseRois(opts.rois);
+    if (rois) this.rois = rois;
+    if (opts.activeIndex === null) this.activeIndex = null;
+    if (typeof opts.activeIndex === "number") {
+      const index = Math.floor(opts.activeIndex);
+      this.activeIndex = index >= 0 && index < this.rois.length ? index : null;
+    }
+    if (this.activeIndex !== null && this.activeIndex >= this.rois.length) this.activeIndex = null;
     if (typeof opts.enabled === "boolean") this.enabled = opts.enabled;
-    if (typeof opts.unit === "string") this.unit = opts.unit;
-    if (typeof opts.onRoiChange === "function") {
-      this.onRoiChange = opts.onRoiChange as RoiChangeCallback;
+    if (typeof opts.onRoisChange === "function") {
+      this.onRoisChange = opts.onRoisChange as RoiSelectionsChangeCallback;
+    }
+    if (typeof opts.onActiveIndexChange === "function") {
+      this.onActiveIndexChange = opts.onActiveIndexChange as RoiActiveIndexChangeCallback;
     }
   }
 
@@ -312,46 +382,57 @@ export class RoiSelectorOverlay extends BaseOverlay {
     height  : number,
     els     : RoiSelectorElements,
   ): void {
-    els.volumeLayer.style.display       = "none";
-    els.surface.style.display           = "";
-    els.surface.style.pointerEvents     = this.enabled ? "auto" : "none";
+    this.ensureSelectionElements(this.rois.length);
+    els.surface.style.display       = "";
+    els.surface.style.pointerEvents = this.enabled ? "auto" : "none";
 
-    const roi = this.roi;
-    if (!roi || width <= 0 || height <= 0) {
-      els.sliceLayer.style.display  = "none";
-      els.label.style.display       = "none";
-      return;
-    }
-    els.sliceLayer.style.display = "";
+    els.selections.forEach((selection, index) => {
+      selection.volumeLayer.style.display = "none";
+      const roi = this.rois[index];
+      if (!roi || width <= 0 || height <= 0) {
+        selection.sliceLayer.style.display   = "none";
+        selection.label.style.display        = "none";
+        selection.removeButton.style.display = "none";
+        return;
+      }
 
-    const pMin = physicalToSliceScreen(roi.min, state, axisMap, width, height);
-    const pMax = physicalToSliceScreen(roi.max, state, axisMap, width, height);
-    const x = Math.min(pMin[0], pMax[0]);
-    const y = Math.min(pMin[1], pMax[1]);
-    const w = Math.max(1, Math.abs(pMax[0] - pMin[0]));
-    const h = Math.max(1, Math.abs(pMax[1] - pMin[1]));
+      selection.sliceLayer.style.display = "";
+      const pMin = physicalToSliceScreen(roi.min, state, axisMap, width, height);
+      const pMax = physicalToSliceScreen(roi.max, state, axisMap, width, height);
+      const x = Math.min(pMin[0], pMax[0]);
+      const y = Math.min(pMin[1], pMax[1]);
+      const w = Math.max(1, Math.abs(pMax[0] - pMin[0]));
+      const h = Math.max(1, Math.abs(pMax[1] - pMin[1]));
+      const active = index === this.activeIndex;
 
-    els.body.setAttribute("x", `${x}`);
-    els.body.setAttribute("y", `${y}`);
-    els.body.setAttribute("width", `${w}`);
-    els.body.setAttribute("height", `${h}`);
-    els.body.style.pointerEvents  = this.enabled ? "auto" : "none";
-    els.body.style.strokeDasharray = this.drag?.kind === "create" ? "4 3" : "none";
+      selection.body.setAttribute("x", `${x}`);
+      selection.body.setAttribute("y", `${y}`);
+      selection.body.setAttribute("width", `${w}`);
+      selection.body.setAttribute("height", `${h}`);
+      selection.body.style.cursor          = active ? "move" : "pointer";
+      selection.body.style.pointerEvents   = this.enabled ? "auto" : "none";
+      selection.body.style.strokeWidth     = active ? "1.5px" : "1px";
+      selection.body.style.strokeDasharray = this.drag?.kind === "create" && this.drag.index === index ? "4 3" : "none";
 
-    HANDLE_CORNERS.forEach((corner, index) => {
-      const handle = els.handles[index];
-      handle.style.display = this.enabled ? "" : "none";
-      const cx = corner.uSide === "min" ? pMin[0] : pMax[0];
-      const cy = corner.vSide === "min" ? pMin[1] : pMax[1];
-      handle.setAttribute("x", `${cx - HANDLE_SIZE / 2}`);
-      handle.setAttribute("y", `${cy - HANDLE_SIZE / 2}`);
+      HANDLE_CORNERS.forEach((corner, cornerIndex) => {
+        const handle = selection.handles[cornerIndex];
+        handle.style.display = this.enabled && active ? "" : "none";
+        const cx = corner.uSide === "min" ? pMin[0] : pMax[0];
+        const cy = corner.vSide === "min" ? pMin[1] : pMax[1];
+        handle.setAttribute("x", `${cx - HANDLE_SIZE / 2}`);
+        handle.setAttribute("y", `${cy - HANDLE_SIZE / 2}`);
+      });
+
+      selection.labelText.textContent = this.rangeText(index);
+      selection.label.style.display   = "flex";
+      selection.label.style.left      = `${Math.max(6, Math.min(width - 8, x))}px`;
+      selection.label.style.top       = `${Math.max(6, Math.min(height - 58, y + h + 7))}px`;
+
+      selection.removeButton.style.display = this.enabled ? "block" : "none";
+      selection.removeButton.style.left    = `${Math.max(18, Math.min(width - 4, x + w))}px`;
+      selection.removeButton.style.top     = `${Math.max(4, Math.min(height - 22, y + 4))}px`;
+      selection.removeButton.style.transform = "translateX(-100%)";
     });
-
-    const unit = this.unit ?? state.physical?.spatial?.unit ?? "µm";
-    els.labelText.textContent = this.rangeText(unit);
-    els.label.style.display   = "flex";
-    els.label.style.left      = `${Math.max(6, Math.min(width - 8, x))}px`;
-    els.label.style.top       = `${Math.max(6, Math.min(height - 32, y + h + 7))}px`;
   }
 
   /** Volume / navigator view: read-only 12-edge wireframe of the box. */
@@ -362,45 +443,79 @@ export class RoiSelectorOverlay extends BaseOverlay {
     els    : RoiSelectorElements,
   ): void {
     els.surface.style.display     = "none";
-    els.sliceLayer.style.display  = "none";
-    els.label.style.display       = "none";
+    this.ensureSelectionElements(this.rois.length);
 
-    const roi = this.roi;
-    if (!roi || width <= 0 || height <= 0) {
-      els.volumeLayer.style.display = "none";
-      return;
-    }
-    els.volumeLayer.style.display = "";
-
-    const { min, max } = roi;
-    const corners: Vec3[] = [
-      [min[0], min[1], min[2]], [max[0], min[1], min[2]],
-      [min[0], max[1], min[2]], [max[0], max[1], min[2]],
-      [min[0], min[1], max[2]], [max[0], min[1], max[2]],
-      [min[0], max[1], max[2]], [max[0], max[1], max[2]],
-    ];
-    const camera    = state.exploration.camera;
-    const projected = corners.map((corner) => physicalToVolumeScreen(corner, camera, width, height));
-
-    EDGE_PAIRS.forEach(([first, second], index) => {
-      const edge  = els.edges[index];
-      const start = projected[first];
-      const end   = projected[second];
-      if (start && end) {
-        edge.setAttribute("x1", `${start[0]}`);
-        edge.setAttribute("y1", `${start[1]}`);
-        edge.setAttribute("x2", `${end[0]}`);
-        edge.setAttribute("y2", `${end[1]}`);
-        edge.style.display = "";
-      } else {
-        edge.style.display = "none";
+    els.selections.forEach((selection, selectionIndex) => {
+      selection.sliceLayer.style.display   = "none";
+      selection.label.style.display        = "none";
+      selection.removeButton.style.display = "none";
+      const roi = this.rois[selectionIndex];
+      if (!roi || width <= 0 || height <= 0) {
+        selection.volumeLayer.style.display = "none";
+        return;
       }
+      selection.volumeLayer.style.display = "";
+
+      const { min, max } = roi;
+      const corners: Vec3[] = [
+        [min[0], min[1], min[2]], [max[0], min[1], min[2]],
+        [min[0], max[1], min[2]], [max[0], max[1], min[2]],
+        [min[0], min[1], max[2]], [max[0], min[1], max[2]],
+        [min[0], max[1], max[2]], [max[0], max[1], max[2]],
+      ];
+      const camera    = state.exploration.camera;
+      const projected = corners.map((corner) => {
+        const viewProjection = this.projectPhysicalToScreen(corner);
+        return viewProjection === undefined
+          ? physicalToVolumeScreen(corner, camera, width, height)
+          : viewProjection;
+      });
+
+      EDGE_PAIRS.forEach(([first, second], edgeIndex) => {
+        const edge  = selection.edges[edgeIndex];
+        const start = projected[first];
+        const end   = projected[second];
+        if (start && end) {
+          edge.setAttribute("x1", `${start[0]}`);
+          edge.setAttribute("y1", `${start[1]}`);
+          edge.setAttribute("x2", `${end[0]}`);
+          edge.setAttribute("y2", `${end[1]}`);
+          edge.style.display = "";
+        } else {
+          edge.style.display = "none";
+        }
+      });
     });
   }
 
   // ==========================================================================
   // INTERACTION
   // ==========================================================================
+
+  /** Keep canvas-owned wheel zoom working while the selector SVG is on top. */
+  private readonly handleWheel = (event: WheelEvent): void => {
+    const canvas = this.getCanvas();
+    if (!canvas) return;
+
+    event.stopPropagation();
+    const forwarded = new WheelEvent(event.type, {
+      bubbles    : true,
+      cancelable : true,
+      composed   : true,
+      clientX    : event.clientX,
+      clientY    : event.clientY,
+      ctrlKey    : event.ctrlKey,
+      shiftKey   : event.shiftKey,
+      altKey     : event.altKey,
+      metaKey    : event.metaKey,
+      deltaX     : event.deltaX,
+      deltaY     : event.deltaY,
+      deltaZ     : event.deltaZ,
+      deltaMode  : event.deltaMode,
+    });
+    canvas.dispatchEvent(forwarded);
+    if (forwarded.defaultPrevented) event.preventDefault();
+  };
 
   /** Unproject a pointer event to a physical position on the slice plane. */
   private pointFromEvent(event: PointerEvent): Vec3 | null {
@@ -442,33 +557,53 @@ export class RoiSelectorOverlay extends BaseOverlay {
     start[u] = clamp(start[u], bounds.min[u], bounds.max[u]);
     start[v] = clamp(start[v], bounds.min[v], bounds.max[v]);
 
-    this.drag = { kind: "create", start, previous: this.roi ? cloneRoi(this.roi) : null };
-
     const next: RoiBox = { min: [...start] as Vec3, max: [...start] as Vec3 };
     next.min[s] = bounds.min[s];
     next.max[s] = bounds.max[s];
-    this.roi = next;
+    const previousActive = this.activeIndex;
+    const index = this.rois.length;
+    this.rois = [...this.rois, next];
+    this.drag = { kind: "create", index, start, previousActive };
+    this.emitRoisChange(index, "create", "live");
+    this.setActiveIndex(index, true);
 
     this.addDragListeners();
+    this.getOwner()?.requestRender();
     event.preventDefault();
   };
 
-  private readonly handleBodyPointerDown = (event: PointerEvent): void => {
+  private handleBodyPointerDown(selection: RoiSelectionElements, event: PointerEvent): void {
     event.stopPropagation();
-    if (!this.enabled || event.button !== 0 || !this.roi) return;
+    if (!this.enabled || event.button !== 0) return;
+    const index = this.els?.selections.indexOf(selection) ?? -1;
+    const roi = this.rois[index];
+    if (index < 0 || !roi) return;
+    if (index !== this.activeIndex) {
+      this.setActiveIndex(index, true);
+      this.getOwner()?.requestRender();
+      event.preventDefault();
+      return;
+    }
     const point = this.pointFromEvent(event);
     if (!point) return;
 
-    this.drag = { kind: "move", start: point, original: cloneRoi(this.roi) };
+    this.drag = { kind: "move", index, start: point, original: cloneRoi(roi) };
     this.addDragListeners();
     event.preventDefault();
-  };
+  }
 
-  private startResize(corner: { uSide: AxisSide; vSide: AxisSide }, event: PointerEvent): void {
+  private startResize(
+    selection : RoiSelectionElements,
+    corner    : { uSide: AxisSide; vSide: AxisSide },
+    event     : PointerEvent,
+  ): void {
     event.stopPropagation();
-    if (!this.enabled || event.button !== 0 || !this.roi) return;
+    if (!this.enabled || event.button !== 0) return;
+    const index = this.els?.selections.indexOf(selection) ?? -1;
+    const roi = this.rois[index];
+    if (index < 0 || index !== this.activeIndex || !roi) return;
 
-    this.drag = { kind: "resize", uSide: corner.uSide, vSide: corner.vSide, original: cloneRoi(this.roi) };
+    this.drag = { kind: "resize", index, uSide: corner.uSide, vSide: corner.vSide, original: cloneRoi(roi) };
     this.addDragListeners();
     event.preventDefault();
   }
@@ -496,8 +631,8 @@ export class RoiSelectorOverlay extends BaseOverlay {
       next.max[v] = Math.max(drag.start[v], pv);
       next.min[s] = bounds.min[s];
       next.max[s] = bounds.max[s];
-      this.roi = next;
-      this.emitRoiChange();
+      this.replaceRoi(drag.index, next);
+      this.emitRoisChange(drag.index, "create", "live");
       return;
     }
 
@@ -511,8 +646,8 @@ export class RoiSelectorOverlay extends BaseOverlay {
         next.min[axis] = drag.original.min[axis] + delta;
         next.max[axis] = drag.original.max[axis] + delta;
       }
-      this.roi = next;
-      this.emitRoiChange();
+      this.replaceRoi(drag.index, next);
+      this.emitRoisChange(drag.index, "move", "live");
       return;
     }
 
@@ -525,8 +660,8 @@ export class RoiSelectorOverlay extends BaseOverlay {
     else next.max[u] = Math.max(pu, drag.original.min[u]);
     if (drag.vSide === "min") next.min[v] = Math.min(pv, drag.original.max[v]);
     else next.max[v] = Math.max(pv, drag.original.min[v]);
-    this.roi = next;
-    this.emitRoiChange();
+    this.replaceRoi(drag.index, next);
+    this.emitRoisChange(drag.index, "resize", "live");
   };
 
   private readonly handleWindowPointerUp = (): void => {
@@ -538,15 +673,19 @@ export class RoiSelectorOverlay extends BaseOverlay {
     // A create drag with no in-plane extent is a plain click — restore the
     // previous box instead of keeping a degenerate one.
     const axisMap = this.getAxisMap();
-    if (drag.kind === "create" && this.roi && axisMap) {
+    const roi = this.rois[drag.index];
+    if (drag.kind === "create" && roi && axisMap) {
       const u = axisMap[0];
       const v = axisMap[1];
-      if (this.roi.min[u] === this.roi.max[u] && this.roi.min[v] === this.roi.max[v]) {
-        this.roi = drag.previous ? cloneRoi(drag.previous) : null;
+      if (roi.min[u] === roi.max[u] && roi.min[v] === roi.max[v]) {
+        this.rois = this.rois.filter((_, index) => index !== drag.index);
+        this.setActiveIndex(drag.previousActive, true);
+        this.emitRoisChange(drag.index, "create", "commit");
+        this.getOwner()?.requestRender();
         return;
       }
     }
-    this.emitRoiChange();
+    this.emitRoisChange(drag.index, drag.kind, "commit");
   };
 
   private addDragListeners(): void {
@@ -568,7 +707,8 @@ export class RoiSelectorOverlay extends BaseOverlay {
     this.drag = null;
     this.removeDragListeners();
     if (drag.kind === "create") {
-      this.roi = drag.previous ? cloneRoi(drag.previous) : null;
+      this.rois = this.rois.filter((_, index) => index !== drag.index);
+      this.setActiveIndex(drag.previousActive, false);
     }
   }
 
@@ -576,16 +716,16 @@ export class RoiSelectorOverlay extends BaseOverlay {
   // LABEL / CALLBACK
   // ==========================================================================
 
-  private rangeText(unit: string): string {
-    const roi = this.roi;
+  private rangeText(index: number): string {
+    const roi = this.rois[index];
     if (!roi) return "";
-    const format = (axis: number): string => `${roi.min[axis].toFixed(1)}-${roi.max[axis].toFixed(1)}`;
-    return `X ${format(0)}  Y ${format(1)}  Z ${format(2)} ${unit}`;
+    const format = (axis: number): string => `${roi.min[axis].toFixed(1)} - ${roi.max[axis].toFixed(1)}`;
+    return `X ${format(0)}\nY ${format(1)}\nZ ${format(2)}`;
   }
 
-  private async copyRange(): Promise<void> {
-    const unit = this.unit ?? this.state?.physical?.spatial?.unit ?? "µm";
-    const text = this.rangeText(unit);
+  private async copyRange(selection: RoiSelectionElements): Promise<void> {
+    const index = this.els?.selections.indexOf(selection) ?? -1;
+    const text = this.rangeText(index);
     if (!text) return;
     try {
       await navigator.clipboard.writeText(text);
@@ -594,8 +734,35 @@ export class RoiSelectorOverlay extends BaseOverlay {
     }
   }
 
-  private emitRoiChange(): void {
-    if (!this.onRoiChange || !this.roi) return;
-    this.onRoiChange(cloneRoi(this.roi));
+  private removeSelection(selection: RoiSelectionElements, event: MouseEvent): void {
+    event.stopPropagation();
+    event.preventDefault();
+    const index = this.els?.selections.indexOf(selection) ?? -1;
+    if (index < 0 || index >= this.rois.length) return;
+    this.rois = this.rois.filter((_, selectionIndex) => selectionIndex !== index);
+    const nextActive = this.activeIndex === index
+      ? null
+      : this.activeIndex !== null && this.activeIndex > index
+        ? this.activeIndex - 1
+        : this.activeIndex;
+    this.setActiveIndex(nextActive, true);
+    this.emitRoisChange(index, "remove", "commit");
+    this.getOwner()?.requestRender();
+  }
+
+  private replaceRoi(index: number, roi: RoiBox): void {
+    this.rois = this.rois.map((current, selectionIndex) => selectionIndex === index ? roi : current);
+    this.getOwner()?.requestRender();
+  }
+
+  private setActiveIndex(index: number | null, emit: boolean): void {
+    const next = index !== null && index >= 0 && index < this.rois.length ? index : null;
+    if (next === this.activeIndex) return;
+    this.activeIndex = next;
+    if (emit) this.onActiveIndexChange?.(next);
+  }
+
+  private emitRoisChange(index: number, kind: RoiChangeKind, phase: RoiChangePhase): void {
+    this.onRoisChange?.(cloneRois(this.rois), { index, kind, phase });
   }
 }

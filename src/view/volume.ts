@@ -22,6 +22,7 @@ import {
   MODE_TRANSITION_MS,
   VOLUME_RAY_SAMPLE_COUNT,
 } from "../defaults";
+import { physicalToVolumeScreen } from "../utils";
 
 export class VolumeView extends BaseView {
   static readonly viewType = "volume";
@@ -29,8 +30,9 @@ export class VolumeView extends BaseView {
   private depthTexture? : GPUTexture;
   private pipeline!     : ImagePipeline;
 
-  private lastMode?   : string;
-  private lastScene?  : Scene;
+  private lastMode?      : string;
+  private lastScene?     : Scene;
+  private renderedScene? : Scene;
   private modeTransition?: {
     startTime : number;
     durationMs: number;
@@ -106,6 +108,7 @@ export class VolumeView extends BaseView {
     const maxExtent     = Math.max(...(state.physical?.spatial?.size ?? [1, 1, 1]));
     const directCamera  = this.createCamera(cam, maxExtent);
     const camera        = this.getTransitionCamera(cam, directCamera);
+    this.renderedScene  = camera;
 
     const aspect          = this.canvas.width / this.canvas.height;
     const usefulPixels    = Math.max(1, Math.min(this.canvas.height, VOLUME_RAY_SAMPLE_COUNT));
@@ -198,7 +201,20 @@ export class VolumeView extends BaseView {
   protected override onDestroy(): void {
     this.pipeline?.destroy();
     this.depthTexture?.destroy();
-    this.depthTexture = undefined;
+    this.depthTexture  = undefined;
+    this.renderedScene = undefined;
+  }
+
+  protected override projectPhysicalToScreen(position: Vec3) {
+    const scene = this.renderedScene;
+    if (!scene || this.canvas.clientWidth <= 0 || this.canvas.clientHeight <= 0) return undefined;
+    return physicalToVolumeScreen(
+      position,
+      scene,
+      this.canvas.clientWidth,
+      this.canvas.clientHeight,
+      scene.fov,
+    );
   }
 
   /** Volume-only: KeyF toggles fly/orbit nav mode. */

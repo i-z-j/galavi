@@ -15,7 +15,7 @@
  * root; inline styles reference `var(--galavi-*)`.
  */
 
-import type { State } from "../types";
+import type { State, Vec2, Vec3 } from "../types";
 import type { Galavi } from "../main";
 import type { AxisMap } from "../utils/axes";
 import {
@@ -34,6 +34,7 @@ type OverlayBinding = {
   getAxisMap()  : AxisMap | undefined;
   getTheme()    : GalaviTheme;
   getOwner()    : Galavi | undefined;
+  projectPhysicalToScreen?(position: Vec3): Vec2 | null | undefined;
 };
 
 export type OverlayCornerPosition = "top-left" | "top-right" | "bottom-left" | "bottom-right";
@@ -78,7 +79,10 @@ export abstract class BaseOverlay {
     root.style.zIndex         = "10";
     root.style.display        = "none";
 
-    parent.style.position = parent.style.position || "relative";
+    // Anchor the absolutely-positioned overlay root: only force `relative`
+    // on statically-positioned hosts — never clobber a stylesheet position
+    // (e.g. an `absolute` overlay frame), which would drop it in-flow.
+    if (getComputedStyle(parent).position === "static") parent.style.position = "relative";
     parent.appendChild(root);
 
     this.root   = root;
@@ -174,6 +178,11 @@ export abstract class BaseOverlay {
   /** The Galavi instance owning the bound view (e.g. for follow views). */
   protected getOwner(): Galavi | undefined {
     return this.binding?.getOwner();
+  }
+
+  /** Project through the bound view's effective render camera when available. */
+  protected projectPhysicalToScreen(position: Vec3): Vec2 | null | undefined {
+    return this.binding?.projectPhysicalToScreen?.(position);
   }
 
   /** The resolved theme (global galavi theme + per-overlay override). */

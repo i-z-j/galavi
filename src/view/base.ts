@@ -15,6 +15,7 @@ import type {
   Action,
   ID,
   LayerConfig,
+  Vec2,
   Vec3,
   ViewResolution,
 } from "../types";
@@ -116,6 +117,7 @@ export abstract class BaseView {
     getAxisMap: () => this.getAxisMap(),
     getTheme: () => this.galavi?.theme ?? FUI_THEME,
     getOwner: () => this.galavi,
+    projectPhysicalToScreen: (position: Vec3) => this.projectPhysicalToScreen(position),
   };
 
   constructor(id: ID) {
@@ -146,6 +148,9 @@ export abstract class BaseView {
   /** Hook for canvas identity or pixel-size changes that affect view resolution. */
   protected onViewportChanged(): void {}
   protected onDestroy(): void {}
+  protected projectPhysicalToScreen(_position: Vec3): Vec2 | null | undefined {
+    return undefined;
+  }
 
   /**
    * Override to render all layer entries.

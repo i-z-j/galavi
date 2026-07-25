@@ -2,7 +2,7 @@
  * RulerOverlay — draggable two-endpoint measurement line.
  *
  * Port of the cerevi-web `RulerOverlay.vue` component to the BaseOverlay
- * architecture: an SVG line with draggable circle handles at both endpoints,
+ * architecture: an SVG line with draggable bar handles at both endpoints,
  * a thick invisible hit-target for whole-line drags, and a distance label at
  * the line midpoint. `unitsPerPixel` is derived from the live galavi `State`
  * each frame (slice views → orthographic scale, volume views → perspective
@@ -25,9 +25,9 @@ export class RulerOverlay extends BaseOverlay {
   private hitLineEl? : SVGLineElement;
   private lineEl?    : SVGLineElement;
   private startHitEl?: SVGCircleElement;
-  private startEl?   : SVGCircleElement;
+  private startEl?   : SVGLineElement;
   private endHitEl?  : SVGCircleElement;
-  private endEl?     : SVGCircleElement;
+  private endEl?     : SVGLineElement;
   private labelEl?   : HTMLDivElement;
 
   private start : Point = { x: 0, y: 0 };
@@ -87,10 +87,10 @@ export class RulerOverlay extends BaseOverlay {
     hitLine.addEventListener("pointerdown", (event) => this.beginDrag("line", event as PointerEvent));
 
     const line = document.createElementNS(SVG_NS, "line");
-    line.style.stroke         = "var(--galavi-warn)";
+    line.style.stroke         = "var(--galavi-accent)";
     line.style.strokeLinecap  = "round";
 
-    const buildHandle = (cursor: string): { group: SVGGElement; hit: SVGCircleElement; dot: SVGCircleElement } => {
+    const buildHandle = (cursor: string): { group: SVGGElement; hit: SVGCircleElement; bar: SVGLineElement } => {
       const group = document.createElementNS(SVG_NS, "g");
       group.style.pointerEvents = "all";
       group.style.cursor        = cursor;
@@ -99,15 +99,13 @@ export class RulerOverlay extends BaseOverlay {
       hit.setAttribute("r", "9");
       hit.style.fill = "transparent";
 
-      const dot = document.createElementNS(SVG_NS, "circle");
-      dot.setAttribute("r", "6");
-      dot.style.fill        = "var(--galavi-panel-bg)";
-      dot.style.stroke      = "var(--galavi-warn)";
-      dot.style.strokeWidth = "2";
+      const bar = document.createElementNS(SVG_NS, "line");
+      bar.style.stroke        = "var(--galavi-accent)";
+      bar.style.strokeLinecap = "square";
 
       group.appendChild(hit);
-      group.appendChild(dot);
-      return { group, hit, dot };
+      group.appendChild(bar);
+      return { group, hit, bar };
     };
 
     const startHandle = buildHandle("grab");
@@ -132,9 +130,9 @@ export class RulerOverlay extends BaseOverlay {
     this.hitLineEl  = hitLine;
     this.lineEl     = line;
     this.startHitEl = startHandle.hit;
-    this.startEl    = startHandle.dot;
+    this.startEl    = startHandle.bar;
     this.endHitEl   = endHandle.hit;
-    this.endEl      = endHandle.dot;
+    this.endEl      = endHandle.bar;
     this.labelEl    = label;
 
     this.applyStyles();
@@ -187,13 +185,14 @@ export class RulerOverlay extends BaseOverlay {
 
     this.startHitEl.setAttribute("cx", String(this.start.x));
     this.startHitEl.setAttribute("cy", String(this.start.y));
-    this.startEl.setAttribute("cx", String(this.start.x));
-    this.startEl.setAttribute("cy", String(this.start.y));
-
     this.endHitEl.setAttribute("cx", String(this.end.x));
     this.endHitEl.setAttribute("cy", String(this.end.y));
-    this.endEl.setAttribute("cx", String(this.end.x));
-    this.endEl.setAttribute("cy", String(this.end.y));
+
+    const lineLength = Math.max(1, Math.hypot(this.end.x - this.start.x, this.end.y - this.start.y));
+    const capOffsetX = (this.start.y - this.end.y) / lineLength * 6;
+    const capOffsetY = (this.end.x - this.start.x) / lineLength * 6;
+    this.positionCap(this.startEl, this.start, capOffsetX, capOffsetY);
+    this.positionCap(this.endEl, this.end, capOffsetX, capOffsetY);
 
     const unit           = this.opts.unit ?? state.physical?.spatial?.unit ?? "µm";
     const unitsPerPixel  = this.computeUnitsPerPixel(state);
@@ -217,15 +216,25 @@ export class RulerOverlay extends BaseOverlay {
   // HELPERS
   // ============================================================================
 
-  /** Default horizontal segment, proportional to the viewport (cerevi `reset`). */
+  /** Default horizontal segment centered in the viewport's upper-right area. */
   private reset(): void {
     const canvas  = this.getCanvas();
     const width   = canvas?.clientWidth ?? this.getHostElement()?.clientWidth ?? 0;
-    const right   = Math.max(60, width - 40);
-    this.start.x  = Math.max(40, right - Math.min(200, width * 0.3));
-    this.start.y  = 64;
-    this.end.x    = right;
-    this.end.y    = 64;
+    const height  = canvas?.clientHeight ?? this.getHostElement()?.clientHeight ?? 0;
+    const centerX = width * 0.7;
+    const centerY = height * 0.125;
+    const length  = Math.min(200, Math.max(60, width * 0.25));
+    this.start.x  = Math.max(12, centerX - length / 2);
+    this.start.y  = Math.max(12, centerY);
+    this.end.x    = Math.min(width - 12, centerX + length / 2);
+    this.end.y    = Math.max(12, centerY);
+  }
+
+  private positionCap(element: SVGLineElement, point: Point, offsetX: number, offsetY: number): void {
+    element.setAttribute("x1", String(point.x - offsetX));
+    element.setAttribute("y1", String(point.y - offsetY));
+    element.setAttribute("x2", String(point.x + offsetX));
+    element.setAttribute("y2", String(point.y + offsetY));
   }
 
   private computeUnitsPerPixel(state: State): number | undefined {
@@ -251,6 +260,9 @@ export class RulerOverlay extends BaseOverlay {
     if (!this.lineEl || !this.hitLineEl) return;
     this.lineEl.style.strokeWidth    = String(this.opts.lineWidth);
     this.hitLineEl.style.strokeWidth = String(Math.max(12, this.opts.lineWidth + 8));
+    const capWidth = String(Math.max(2, this.opts.lineWidth));
+    if (this.startEl) this.startEl.style.strokeWidth = capWidth;
+    if (this.endEl) this.endEl.style.strokeWidth = capWidth;
   }
 }
 
