@@ -17,6 +17,12 @@ import type {
   Vec3,
 } from "../../types";
 import {
+  optArray,
+  optAxis,
+  optNumber,
+  optString,
+  optVec2,
+  optVec3,
   resolveAxes,
   resolveDataUrl,
   sourceChanged,
@@ -77,6 +83,19 @@ export interface ShapesConfig {
   source?          : Data;
 }
 
+/**
+ * Options accepted in `LayerConfig.options` for {@link ShapesLayer}.
+ * Adds `axes` (read at frame time for surface-intersection shapes), which the
+ * constructor config does not take.
+ */
+export interface ShapesOptions extends Omit<ShapesConfig, "source"> {
+  /** Slice-plane axes [u, v] for surface-intersection shapes */
+  axes? : (string | number)[];
+}
+
+/** `LayerConfig` with the shapes layer's typed options bag. */
+export type ShapesLayerConfig = LayerConfig<ShapesOptions>;
+
 // ============================================================================
 // SHAPES PARAMETERS
 // ============================================================================
@@ -117,13 +136,14 @@ export class ShapesLayerParams implements LayerParams {
 
 export class ShapesLayer extends BaseLayer {
   static readonly layerType = "shapes";
-  static fromConfig(id: string, desc: LayerConfig): ShapesLayer {
+  static fromConfig(id: string, desc: ShapesLayerConfig): ShapesLayer {
+    const opts = desc.options ?? {};
     return new ShapesLayer(id, {
-      color           : (desc.options?.color as Vec3) ?? undefined,
-      opacity         : desc.options?.opacity as number | undefined,
-      entries         : desc.options?.entries as ShapeEntry[] | undefined,
-      dataSize        : (desc.options?.dataSize as Vec3) ?? undefined,
-      surfaceSourceId : desc.options?.surfaceSourceId as string | undefined,
+      color           : optVec3(opts.color),
+      opacity         : optNumber(opts.opacity),
+      entries         : optArray(opts.entries, optShapeEntry),
+      dataSize        : optVec3(opts.dataSize),
+      surfaceSourceId : optString(opts.surfaceSourceId),
       source          : desc.data,
     });
   }
@@ -238,8 +258,7 @@ export class ShapesLayer extends BaseLayer {
     };
   }
 
-  getParams(): LayerParams {
-    this.params.setOpacity(this.opacity);
+  protected getLayerParams(): LayerParams {
     return this.params;
   }
 
@@ -279,7 +298,7 @@ export class ShapesLayer extends BaseLayer {
     const self = siblings.get(this.id);
     if (!self?.desc.options) return;
 
-    const axes = self.desc.options.axes as (string | number)[] | undefined;
+    const axes = optArray(self.desc.options.axes, optAxis);
     if (!axes || axes.length < 2) return;
 
     const axisMap   = resolveAxes(axes);
@@ -380,4 +399,11 @@ export class ShapesLayer extends BaseLayer {
 
 function isSurfaceLayer(layer?: BaseLayer): layer is SurfaceLayer {
   return layer instanceof SurfaceLayer;
+}
+
+/** Minimal structural check: an entry must at least carry [x,y] vertex pairs. */
+function optShapeEntry(value: unknown): ShapeEntry | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const vertices = optArray((value as ShapeEntry).vertices, optVec2);
+  return vertices ? { ...(value as ShapeEntry), vertices } : undefined;
 }

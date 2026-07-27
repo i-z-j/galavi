@@ -35,6 +35,7 @@ import {
   type AxisMap,
 } from "../utils";
 import { BaseOverlay } from "./base";
+import { SVG_NS, clamp, createFullscreenSvg, physicalBounds } from "./utils";
 
 export type RoiBox = { min: Vec3; max: Vec3 };
 export type RoiChangeKind = "create" | "move" | "resize" | "remove";
@@ -71,7 +72,6 @@ interface RoiSelectorElements {
   selections: RoiSelectionElements[];
 }
 
-const SVG_NS      = "http://www.w3.org/2000/svg";
 const HANDLE_SIZE = 10;
 
 /** Logical box corners (u side, v side) edited by the four resize handles. */
@@ -138,23 +138,8 @@ function cloneRois(rois: readonly RoiBox[]): RoiBox[] {
   return rois.map(cloneRoi);
 }
 
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(Math.max(value, min), max);
-}
-
 function stopPropagation(event: Event): void {
   event.stopPropagation();
-}
-
-/** Physical bounding box from `state.physical` (defaults to the [0,1]³ space). */
-function physicalBounds(state: State): RoiBox {
-  const spatial         = state.physical?.spatial;
-  const size  : Vec3    = spatial?.size   ?? [1, 1, 1];
-  const origin: Vec3    = spatial?.origin ?? [0, 0, 0];
-  return {
-    min: [origin[0], origin[1], origin[2]],
-    max: [origin[0] + size[0], origin[1] + size[1], origin[2] + size[2]],
-  };
 }
 
 // ============================================================================
@@ -185,11 +170,7 @@ export class RoiSelectorOverlay extends BaseOverlay {
   }
 
   protected override onMount(root: HTMLDivElement, _parent: HTMLElement): void {
-    const svg = document.createElementNS(SVG_NS, "svg");
-    svg.style.position  = "absolute";
-    svg.style.inset     = "0";
-    svg.style.width     = "100%";
-    svg.style.height    = "100%";
+    const svg = createFullscreenSvg();
     svg.style.display   = "block";
     svg.style.overflow  = "hidden";
     svg.addEventListener("wheel", this.handleWheel, { passive: false });

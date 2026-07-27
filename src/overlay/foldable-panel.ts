@@ -1,7 +1,6 @@
 /**
  * FoldablePanelOverlay — collapsible side panel hosting app-provided DOM.
  *
- * Port of cerevi-web's FoldablePanel.vue to the BaseOverlay architecture.
  * Collapsed, the panel is a slim vertical edge tab that fades in on hover and
  * opens on click. Open, it slides in from the edge (CSS transform transition)
  * with a header (uppercase micro-label + collapse chevron) and a scrollable

@@ -3,7 +3,8 @@
  *
  * BaseView — abstract base for all views.
  * Handles GPU init, layer management, overlays, events, canvas resize,
- * shared scene uniforms, and canonical layer ordering.
+ * shared scene uniforms, canonical layer ordering, and shared frame
+ * helpers (camera buffer, depth attachment, render-pass scaffolding).
  *
  * Per-view rendering machinery (`ImagePipeline` + `createView` factory)
  * lives in `./runtime/`.
@@ -25,10 +26,12 @@ import {
   normalizeDrag,
   type AxisMap,
 } from "../utils";
+import { DEPTH_FORMAT } from "../defaults";
 import type { BaseControl } from "../control";
 import { BaseOverlay } from "../overlay";
-import { FUI_THEME } from "../overlay/theme";
+import { DEFAULT_THEME } from "../overlay/theme";
 import { BaseLayer } from "../layer";
+import type { ImagePipeline } from "./runtime";
 
 // ============================================================================
 // SCENE — projection uniforms shared by all views
@@ -100,11 +103,26 @@ export abstract class BaseView {
   protected overlays: BaseOverlay[] = [];
   private localControls: BaseControl[] = [];
 
+  /**
+   * Per-layer raster machinery, assigned by subclasses in initGPUResources.
+   * Base hooks optional-chain it because they can fire before init.
+   */
+  protected pipeline!: ImagePipeline;
+  private depthTexture?: GPUTexture;
+
   private isInitialized = false;
 
   private eventHandlers = new Map<string, EventListener>();
   private boundCanvas?: HTMLCanvasElement;
   private eventsEnabled = false;
+  private resizeObserver?: ResizeObserver;
+
+  /**
+   * Whether the view observes canvas content-box resizes and re-renders on
+   * change (mirrors `ViewConfig.autoResize`, default true). Wired by the view
+   * factory; set before `mount()` to take effect.
+   */
+  autoResize = true;
 
   /** Whether this view is currently active (managed by Explorer) */
   isActive = false;
@@ -115,7 +133,7 @@ export abstract class BaseView {
     getCanvas: () => this.canvas,
     isActive: () => this.isActive,
     getAxisMap: () => this.getAxisMap(),
-    getTheme: () => this.galavi?.theme ?? FUI_THEME,
+    getTheme: () => this.galavi?.theme ?? DEFAULT_THEME,
     getOwner: () => this.galavi,
     projectPhysicalToScreen: (position: Vec3) => this.projectPhysicalToScreen(position),
   };
@@ -140,13 +158,17 @@ export abstract class BaseView {
   protected abstract initGPUResources(): Promise<void>;
   /**
    * Hook called by `mount()` when re-mounting on a different canvas whose
-   * preferred format differs from the previously-bound canvas. Default no-op;
-   * override to invalidate format-bound render pipelines (e.g. by calling
-   * `pipeline.markDirty()` on any owned `ImagePipeline`).
+   * preferred format differs from the previously-bound canvas. Default
+   * invalidates the shared ImagePipeline; override to invalidate any other
+   * format-bound render pipelines the subclass owns.
    */
-  protected onCanvasFormatChanged(): void {}
+  protected onCanvasFormatChanged(): void {
+    this.pipeline?.markDirty();
+  }
   /** Hook for canvas identity or pixel-size changes that affect view resolution. */
-  protected onViewportChanged(): void {}
+  protected onViewportChanged(): void {
+    this.pipeline?.resetResolutionSelection();
+  }
   protected onDestroy(): void {}
   protected projectPhysicalToScreen(_position: Vec3): Vec2 | null | undefined {
     return undefined;
@@ -251,9 +273,12 @@ export abstract class BaseView {
         }
       }
     }
+
+    this.observeCanvasResize(canvas);
   }
 
   unmount(): void {
+    this.unobserveCanvasResize();
     this.disableEvents();
     this.context?.unconfigure();
     for (const overlay of this.overlays) {
@@ -268,12 +293,73 @@ export abstract class BaseView {
 
   destroy(): void {
     this.unmount();
+    for (const layer of [...this.readinessWaiters.keys()]) {
+      this.failReadinessWaiters(layer, new Error(`View "${this.id}" destroyed`));
+    }
     try {
       this.onDestroy();
     } catch (e) {
       console.warn("Error cleaning up GPU resources:", e);
     }
+    this.pipeline?.destroy();
+    this.depthTexture?.destroy();
+    this.depthTexture  = undefined;
     this.isInitialized = false;
+  }
+
+  // === Layer readiness ===
+
+  private readinessWaiters = new Map<BaseLayer, Set<{
+    resolve: (layer: BaseLayer) => void;
+    reject: (err: unknown) => void;
+  }>>();
+
+  /**
+   * Resolve once `layer` reports `isReady`.
+   *
+   * Semantics:
+   * - Resolves immediately when the layer is already ready.
+   * - Otherwise pends until the layer signals through its render-request
+   *   channel (or async init) while `isReady` holds. If the layer's source
+   *   reloads before resolution — flipping `isReady` back to false — the wait
+   *   simply continues until the layer becomes ready for the new data.
+   * - A settled promise is unaffected by later source reloads; callers that
+   *   change a layer's source should call `whenLayerReady` again.
+   * - Rejects with `signal.reason` when the passed AbortSignal aborts, when
+   *   the layer is removed from the view, or when the view is destroyed.
+   */
+  whenLayerReady(layer: BaseLayer, signal?: AbortSignal): Promise<BaseLayer> {
+    if (signal?.aborted) return Promise.reject(signal.reason as unknown);
+    if (layer.isReady) return Promise.resolve(layer);
+    return new Promise((resolve, reject) => {
+      const waiter = { resolve, reject };
+      let waiters = this.readinessWaiters.get(layer);
+      if (!waiters) {
+        waiters = new Set();
+        this.readinessWaiters.set(layer, waiters);
+      }
+      waiters.add(waiter);
+      signal?.addEventListener("abort", () => {
+        waiters.delete(waiter);
+        reject(signal.reason as unknown);
+      }, { once: true });
+    });
+  }
+
+  /** Resolve pending readiness waiters after a layer signal, if it is ready. */
+  private notifyLayerSignal(layer: BaseLayer): void {
+    const waiters = this.readinessWaiters.get(layer);
+    if (!waiters || !layer.isReady) return;
+    this.readinessWaiters.delete(layer);
+    for (const waiter of waiters) waiter.resolve(layer);
+  }
+
+  /** Reject pending readiness waiters (layer removed, view destroyed). */
+  private failReadinessWaiters(layer: BaseLayer, err: unknown): void {
+    const waiters = this.readinessWaiters.get(layer);
+    if (!waiters) return;
+    this.readinessWaiters.delete(layer);
+    for (const waiter of waiters) waiter.reject(err);
   }
 
   // === Layer Management ===
@@ -284,7 +370,12 @@ export abstract class BaseView {
    * so layers no longer touch the GPU during attach.
    */
   private wireLayer(layer: BaseLayer): void {
-    layer.attach({ requestRender: () => this.galavi?.requestRender() });
+    layer.attach({
+      requestRender: () => {
+        this.galavi?.requestRender();
+        this.notifyLayerSignal(layer);
+      },
+    });
     if (this.device) this.initLayerGpu(layer);
   }
 
@@ -293,13 +384,17 @@ export abstract class BaseView {
     void layer.initAsync().then(() => {
       this.onLayersChanged();
       this.galavi?.requestRender();
+      this.notifyLayerSignal(layer);
     });
   }
 
   /**
-   * Override to rebuild pipelines when layers change.
+   * Called when the layer set changes; default invalidates the shared
+   * ImagePipeline so the next frame re-syncs its per-layer pipelines.
    */
-  protected abstract onLayersChanged(): void;
+  protected onLayersChanged(): void {
+    this.pipeline?.markDirty();
+  }
 
   addLayer(layer: BaseLayer): void {
     if (!this.layerEntries.includes(layer)) {
@@ -314,13 +409,23 @@ export abstract class BaseView {
     if (idx >= 0) {
       this.layerEntries.splice(idx, 1);
       layer.detach();
+      this.failReadinessWaiters(
+        layer,
+        new Error(`Layer "${layer.id}" removed from view "${this.id}"`),
+      );
       this.onLayersChanged();
     }
   }
 
   setLayers(entries: BaseLayer[]): void {
     for (const old of this.layerEntries) {
-      if (!entries.includes(old)) old.detach();
+      if (!entries.includes(old)) {
+        old.detach();
+        this.failReadinessWaiters(
+          old,
+          new Error(`Layer "${old.id}" removed from view "${this.id}"`),
+        );
+      }
     }
     this.layerEntries = [...entries];
     for (const layer of this.layerEntries) {
@@ -334,13 +439,13 @@ export abstract class BaseView {
   }
 
   /** View-local pyramid level selected for a tiled layer, if available. */
-  getCurrentLevel(_layerId: ID): number | undefined {
-    return undefined;
+  getCurrentLevel(layerId: ID): number | undefined {
+    return this.pipeline?.getCurrentLevel(layerId);
   }
 
   /** View-local image resolution for a tiled layer, if available. */
-  getResolution(_layerId: ID): ViewResolution | undefined {
-    return undefined;
+  getResolution(layerId: ID): ViewResolution | undefined {
+    return this.pipeline?.getResolution(layerId);
   }
 
   // === Overlay management ===
@@ -431,6 +536,65 @@ export abstract class BaseView {
     ];
   }
 
+  /** Create the per-view scene/camera uniform buffer. */
+  protected createCameraBuffer(label: string): GPUBuffer {
+    return this.device.createBuffer({
+      label,
+      size : SCENE_UNIFORM_SIZE,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+  }
+
+  /** Lazily (re)create the depth attachment to match the canvas pixel size. */
+  protected ensureDepthTexture(label: string): GPUTexture {
+    if (
+      !this.depthTexture ||
+      this.depthTexture.width !== this.canvas.width ||
+      this.depthTexture.height !== this.canvas.height
+    ) {
+      this.depthTexture?.destroy();
+      this.depthTexture = this.device.createTexture({
+        label,
+        size  : [this.canvas.width, this.canvas.height],
+        format: DEPTH_FORMAT,
+        usage : GPUTextureUsage.RENDER_ATTACHMENT,
+      });
+    }
+    return this.depthTexture;
+  }
+
+  /**
+   * Encode one full-canvas render pass (clear to opaque black) and submit it.
+   * `draw` receives the open pass; pass a depth texture (see
+   * `ensureDepthTexture`) for depth-tested 3D views.
+   */
+  protected encodeFrame(
+    draw         : (pass: GPURenderPassEncoder) => void,
+    depthTexture?: GPUTexture,
+  ): void {
+    const depthAttachment: GPURenderPassDepthStencilAttachment | undefined = depthTexture
+      ? {
+          view           : depthTexture.createView(),
+          depthClearValue: 1.0,
+          depthLoadOp    : "clear",
+          depthStoreOp   : "store",
+        }
+      : undefined;
+    const encoder = this.device.createCommandEncoder();
+    const pass    = encoder.beginRenderPass({
+      colorAttachments: [{
+        view      : this.context.getCurrentTexture().createView(),
+        clearValue: [0, 0, 0, 1],
+        loadOp    : "clear",
+        storeOp   : "store",
+      }],
+      ...(depthAttachment ? { depthStencilAttachment: depthAttachment } : {}),
+    });
+    draw(pass);
+    pass.end();
+    this.device.queue.submit([encoder.finish()]);
+  }
+
   /**
    * Create orthographic scene uniform data (2D views).
    * View = translation by -target; projection = ortho with Y-flip.
@@ -488,6 +652,28 @@ export abstract class BaseView {
     data.set(clipToWorld, 16);
     data.set([...scene.position, 1.0], 32);
     return data;
+  }
+
+  /**
+   * Observe the bound canvas for content-box resizes (unless `autoResize` is
+   * off or ResizeObserver is unavailable, e.g. headless tests). On a change
+   * the canvas backing store is re-sized immediately, the viewport hook fires,
+   * and a frame is requested so the new size is actually drawn.
+   */
+  private observeCanvasResize(canvas: HTMLCanvasElement): void {
+    this.unobserveCanvasResize();
+    if (!this.autoResize) return;
+    if (typeof ResizeObserver === "undefined") return;
+    this.resizeObserver = new ResizeObserver(() => {
+      if (this.resizeCanvasToDisplaySize()) this.onViewportChanged();
+      this.galavi?.requestRender();
+    });
+    this.resizeObserver.observe(canvas);
+  }
+
+  private unobserveCanvasResize(): void {
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = undefined;
   }
 
   private resizeCanvasToDisplaySize(): boolean {

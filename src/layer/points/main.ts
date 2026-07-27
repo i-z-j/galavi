@@ -9,7 +9,7 @@
  */
 
 import type { LayerConfig, Vec3 } from "../../types";
-import { EMPTY_VERTEX_BUFFER } from "../../utils";
+import { EMPTY_VERTEX_BUFFER, optArray, optNumber, optVec3 } from "../../utils";
 import {
   BaseLayer,
   MIN_VEC4_BUFFER,
@@ -36,6 +36,12 @@ export interface PointsConfig {
   edgeWidth? : number;
 }
 
+/** Options accepted in `LayerConfig.options` for {@link PointsLayer}. */
+export type PointsOptions = PointsConfig;
+
+/** `LayerConfig` with the points layer's typed options bag. */
+export type PointsLayerConfig = LayerConfig<PointsOptions>;
+
 // ============================================================================
 // POINTS PARAMETERS
 // ============================================================================
@@ -51,6 +57,10 @@ export class PointsLayerParams implements LayerParams {
     if (config?.opacity !== undefined) this.opacity = config.opacity;
     if (config?.size !== undefined) this.size = config.size;
     if (config?.edgeWidth !== undefined) this.edgeWidth = config.edgeWidth;
+  }
+
+  setOpacity(opacity: number): void {
+    this.opacity = opacity;
   }
 
   // Layout matches shader Params struct:
@@ -74,13 +84,14 @@ export class PointsLayerParams implements LayerParams {
 
 export class PointsLayer extends BaseLayer {
   static readonly layerType = "points";
-  static fromConfig(id: string, desc: LayerConfig): PointsLayer {
+  static fromConfig(id: string, desc: PointsLayerConfig): PointsLayer {
+    const opts = desc.options ?? {};
     return new PointsLayer(id, {
-      points    : (desc.options?.points as Vec3[]) ?? undefined,
-      size      : desc.options?.size as number | undefined,
-      color     : (desc.options?.color as Vec3) ?? undefined,
-      opacity   : desc.options?.opacity as number | undefined,
-      edgeWidth : desc.options?.edgeWidth as number | undefined,
+      points    : optArray(opts.points, optVec3),
+      size      : optNumber(opts.size),
+      color     : optVec3(opts.color),
+      opacity   : optNumber(opts.opacity),
+      edgeWidth : optNumber(opts.edgeWidth),
     });
   }
 
@@ -92,7 +103,8 @@ export class PointsLayer extends BaseLayer {
 
   constructor(id?: string, config?: PointsConfig) {
     super(id);
-    this.params = new PointsLayerParams(config);
+    this.params  = new PointsLayerParams(config);
+    this.opacity = this.params.opacity;
     if (config?.points) {
       this._points = [...config.points];
     }
@@ -165,19 +177,16 @@ export class PointsLayer extends BaseLayer {
     this.params.color = color;
   }
 
-  /** Set point opacity */
-  setPointOpacity(opacity: number): void {
-    this.params.opacity = opacity;
-  }
-
   protected override applyOptions(desc: LayerConfig): void {
     super.applyOptions(desc);
-    if (desc.options) {
-      const opts = desc.options;
-      if (opts.points !== undefined) this.setPoints(opts.points as Vec3[]);
-      if (opts.size !== undefined) this.setSize(opts.size as number);
-      if (opts.color !== undefined) this.setColor(opts.color as Vec3);
-    }
+    const opts = desc.options;
+    if (!opts) return;
+    const points = optArray(opts.points, optVec3);
+    if (points !== undefined) this.setPoints(points);
+    const size = optNumber(opts.size);
+    if (size !== undefined) this.setSize(size);
+    const color = optVec3(opts.color);
+    if (color !== undefined) this.setColor(color);
   }
 
   /** Build the packed Float32Array of vec4f positions for GPU storage buffer */
@@ -205,7 +214,7 @@ export class PointsLayer extends BaseLayer {
     };
   }
 
-  getParams(): LayerParams {
+  protected getLayerParams(): LayerParams {
     return this.params;
   }
 

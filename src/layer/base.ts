@@ -13,6 +13,7 @@ import type {
   Vec3,
 } from "../types";
 import type { TileSpec, TileFramePlan, TileViewport } from "../utils";
+import { optNumber, optNumberRecord, optVec2 } from "../utils";
 
 /** Transform descriptor for model matrix construction */
 interface Transform {
@@ -71,6 +72,20 @@ export interface ShaderBindings {
 /** Layer parameters (uniform buffer) */
 export interface LayerParams {
   toBuffer(): Float32Array;
+}
+
+/**
+ * Params that accept the shared render opacity. `BaseLayer.getParams()` syncs
+ * `BaseLayer.opacity` into params implementing this contract — the single
+ * propagation path from state `render.opacity` to every layer's shader.
+ */
+export interface OpacityParams extends LayerParams {
+  setOpacity(opacity: number): void;
+}
+
+/** Narrow params to the opacity-sync contract. */
+function hasOpacitySync(params: LayerParams): params is OpacityParams {
+  return typeof (params as OpacityParams).setOpacity === "function";
 }
 
 /**
@@ -163,11 +178,12 @@ export abstract class BaseLayer {
       // Direct affine override
       this.modelMatrix.set(desc.affine);
     } else {
-      // Build from scale → rotate → translate
+      // wgpu-matrix post-multiplies (mat4.translate(m, v) = m·T), so call in
+      // translate → rotate → scale order to build M = T·R·S.
       mat4.identity(this.modelMatrix);
 
-      if (desc.scale) {
-        mat4.scale(this.modelMatrix, desc.scale, this.modelMatrix);
+      if (desc.translate) {
+        mat4.translate(this.modelMatrix, desc.translate, this.modelMatrix);
       }
       if (desc.rotate) {
         // Euler angles in degrees → radians, applied in XYZ order
@@ -177,8 +193,8 @@ export abstract class BaseLayer {
         mat4.rotateY(this.modelMatrix, ry * toRad, this.modelMatrix);
         mat4.rotateZ(this.modelMatrix, rz * toRad, this.modelMatrix);
       }
-      if (desc.translate) {
-        mat4.translate(this.modelMatrix, desc.translate, this.modelMatrix);
+      if (desc.scale) {
+        mat4.scale(this.modelMatrix, desc.scale, this.modelMatrix);
       }
     }
 
@@ -189,7 +205,22 @@ export abstract class BaseLayer {
   // === GPU contract ===
 
   abstract getGeometry()  : Geometry;
-  abstract getParams()    : LayerParams;
+
+  /**
+   * Uniform params for the current frame. Final dispatch point — subclasses
+   * implement `getLayerParams()`; this wrapper syncs shared render state into
+   * the params at the single point where they leave the layer, so
+   * `BaseLayer.opacity` (set via `applyRenderConfig`) reaches every layer's
+   * shader (C1).
+   */
+  getParams(): LayerParams {
+    const params = this.getLayerParams();
+    if (hasOpacitySync(params)) params.setOpacity(this.opacity);
+    return params;
+  }
+
+  /** Layer-specific params, before shared-state sync (see `getParams`). */
+  protected abstract getLayerParams(): LayerParams;
 
   /**
    * WGSL source for this layer. Subclasses set this in their constructor (or as
@@ -377,9 +408,9 @@ export abstract class BaseLayer {
     const contrastLimits = desc.render?.contrastLimits;
     if (contrastLimits) {
       this.setContrast(contrastLimits[0], contrastLimits[1]);
-    } else if (desc.options?.contrastRange) {
-      const [min, max] = desc.options.contrastRange as [number, number];
-      this.setContrast(min, max);
+    } else {
+      const contrastRange = optVec2(desc.options?.contrastRange);
+      if (contrastRange) this.setContrast(contrastRange[0], contrastRange[1]);
     }
   }
 
@@ -405,11 +436,12 @@ export abstract class BaseLayer {
   protected applyOptions(desc: LayerConfig): void {
     const opts = desc.options;
     if (!opts) return;
-    if (opts.selection) {
-      const sel = opts.selection as Record<string, number>;
+    const sel = optNumberRecord(opts.selection);
+    if (sel) {
       for (const [key, val] of Object.entries(sel)) this.setSelection(key, val);
     }
-    if (opts.timepoint !== undefined) this.setTimepoint(opts.timepoint as number);
+    const timepoint = optNumber(opts.timepoint);
+    if (timepoint !== undefined) this.setTimepoint(timepoint);
   }
 
   /**

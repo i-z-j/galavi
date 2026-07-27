@@ -37,6 +37,7 @@ export function createView(
 ): ViewRuntime {
   const view = viewRegistry.create(config.type, name as ID);
   view.setOwner(galavi);
+  view.autoResize = config.autoResize ?? true;
 
   // Instantiate layer entries
   const layerByName = new Map(layerConfigs.map((layer) => [layer.id, layer]));
@@ -54,7 +55,13 @@ export function createView(
   // Register control(s)
   const localControls: BaseControl[] = [];
   for (const [ctrlType, ctrlOptions] of Object.entries(config.controls ?? {})) {
-    localControls.push(controlRegistry.create(ctrlType, `${name}-${ctrlType}`, ctrlOptions));
+    // Registry boundary is untyped: built-in control factories re-parse their
+    // own options (see `opt*` readers), so a plain options bag suffices here.
+    localControls.push(controlRegistry.create(
+      ctrlType,
+      `${name}-${ctrlType}`,
+      ctrlOptions as Record<string, unknown> | undefined,
+    ));
   }
   if (localControls.length > 0) {
     view.setControls(localControls);

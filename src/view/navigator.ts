@@ -10,14 +10,14 @@
 import type { State, Vec3 } from "../types";
 import { computePosition, cameraAngles } from "../utils";
 import {
-  DEPTH_FORMAT,
   DEFAULT_FOV,
+  NEAR_CLIP_FACTOR,
+  FAR_CLIP_FACTOR,
   NAVIGATOR_FRAMING_MARGIN
 } from "../defaults";
 import { BaseLayer } from "../layer";
 import {
   BaseView,
-  SCENE_UNIFORM_SIZE,
   type Scene,
 } from "./base";
 import { ImagePipeline } from "./runtime";
@@ -25,8 +25,6 @@ import { ImagePipeline } from "./runtime";
 export class NavigatorView extends BaseView {
   static readonly viewType = "navigator";
   private cameraBuffer! : GPUBuffer;
-  private depthTexture? : GPUTexture;
-  private pipeline!     : ImagePipeline;
 
   private isCentered = false;
 
@@ -36,11 +34,7 @@ export class NavigatorView extends BaseView {
   private maxSurfaceExtent? : number;
 
   protected async initGPUResources(): Promise<void> {
-    this.cameraBuffer = this.device.createBuffer({
-      label: "NavigatorView Camera Buffer",
-      size : SCENE_UNIFORM_SIZE,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
+    this.cameraBuffer = this.createCameraBuffer("NavigatorView Camera Buffer");
 
     // Navigator never renders tiled image data, so texture/colormap samplers
     // are not provided — ImagePipeline's tiled-layer guard would throw if a
@@ -56,20 +50,6 @@ export class NavigatorView extends BaseView {
     });
 
     // Navigator is passive — no DOM event handlers.
-  }
-
-  protected onLayersChanged(): void {
-    this.pipeline?.markDirty();
-  }
-
-  protected override onCanvasFormatChanged(): void {
-    this.pipeline?.markDirty();
-  }
-
-  protected override onDestroy(): void {
-    this.pipeline?.destroy();
-    this.depthTexture?.destroy();
-    this.depthTexture = undefined;
   }
 
   protected renderFrame(state: State): void {
@@ -101,48 +81,22 @@ export class NavigatorView extends BaseView {
       target,
       up      : [0, 1, 0],
       fov     : DEFAULT_FOV,
-      near    : ext * 0.001,
-      far     : ext * 10,
+      near    : ext * NEAR_CLIP_FACTOR,
+      far     : ext * FAR_CLIP_FACTOR,
     };
 
     const aspect     = this.canvas.width / this.canvas.height;
     const cameraData = this.createPerspectiveUniforms(camera, aspect);
     this.device.queue.writeBuffer(this.cameraBuffer, 0, cameraData as unknown as ArrayBuffer);
 
-    if (
-      !this.depthTexture ||
-      this.depthTexture.width !== this.canvas.width ||
-      this.depthTexture.height !== this.canvas.height
-    ) {
-      this.depthTexture?.destroy();
-      this.depthTexture = this.device.createTexture({
-        label : "NavigatorView Depth Texture",
-        size  : [this.canvas.width, this.canvas.height],
-        format: DEPTH_FORMAT,
-        usage : GPUTextureUsage.RENDER_ATTACHMENT,
-      });
-    }
+    const depthTexture = this.ensureDepthTexture("NavigatorView Depth Texture");
 
     this.pipeline.writeFrameUniforms(drawables);
 
-    const encoder = this.device.createCommandEncoder();
-    const pass    = encoder.beginRenderPass({
-      colorAttachments: [{
-        view      : this.context.getCurrentTexture().createView(),
-        clearValue: [0, 0, 0, 1],
-        loadOp    : "clear",
-        storeOp   : "store",
-      }],
-      depthStencilAttachment: {
-        view           : this.depthTexture.createView(),
-        depthClearValue: 1.0,
-        depthLoadOp    : "clear",
-        depthStoreOp   : "store",
-      },
-    });
-    this.pipeline.draw(pass, drawables);
-    pass.end();
-    this.device.queue.submit([encoder.finish()]);
+    this.encodeFrame(
+      (pass) => this.pipeline.draw(pass, drawables),
+      depthTexture,
+    );
   }
 
   /** Lazy-init framing from the scene AABB. */

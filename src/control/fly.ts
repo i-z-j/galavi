@@ -17,7 +17,8 @@ import {
   clampPitch,
   computeForward,
   cameraDistance,
-  cameraAngles
+  cameraAngles,
+  optNumber
 } from "../utils";
 import {
   FLY_MOVE_SPEED,
@@ -33,8 +34,8 @@ export interface FlyControlOptions {
 
 export class FlyControl extends BaseControl {
   static readonly controlType = "fly";
-  static create(id: string, options?: Record<string, unknown>): FlyControl {
-    return new FlyControl(id, options as FlyControlOptions | undefined);
+  static create(id: string, options?: FlyControlOptions): FlyControl {
+    return new FlyControl(id, options);
   }
 
   override readonly navMode = "fly" as const;
@@ -43,8 +44,8 @@ export class FlyControl extends BaseControl {
 
   constructor(id: string, options?: FlyControlOptions) {
     super(id);
-    this.moveSpeed        = options?.moveSpeed ?? FLY_MOVE_SPEED;
-    this.lookSensitivity  = options?.lookSensitivity ?? FLY_LOOK_SENSITIVITY;
+    this.moveSpeed        = optNumber(options?.moveSpeed)       ?? FLY_MOVE_SPEED;
+    this.lookSensitivity  = optNumber(options?.lookSensitivity) ?? FLY_LOOK_SENSITIVITY;
   }
 
   handle(action: Action, state: State): State {

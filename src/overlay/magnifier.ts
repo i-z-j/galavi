@@ -1,11 +1,9 @@
 /**
  * MagnifierOverlay — cursor-following loupe hosting a nested galavi view.
  *
- * Port of cerevi-web's MagnifierCanvas.vue shell plus the magnifier follow
- * logic from its VolumeMode/SliceMode components. The overlay is a small
- * square canvas positioned next to the cursor; a nested `Galavi` instance
- * renders the parent view's layers into it with the camera moved closer to
- * the physical cursor position:
+ * The overlay is a small square canvas positioned next to the cursor; a
+ * nested `Galavi` instance renders the parent view's layers into it with the
+ * camera moved closer to the physical cursor position:
  *
  *   scale   = insetSize / parentViewportHeight / zoom
  *   target' = position                 (physical cursor)
@@ -34,12 +32,12 @@ import type { State, Vec3 } from "../types";
 import { physicalToSliceScreen, physicalToVolumeScreen, type AxisMap } from "../utils";
 import { createGalavi, type Galavi } from "../main";
 import { BaseOverlay } from "./base";
+import { SVG_NS, clamp, createFullscreenSvg, physicalBounds } from "./utils";
 
 // ============================================================================
 // CONSTANTS
 // ============================================================================
 
-const SVG_NS    = "http://www.w3.org/2000/svg";
 const FRAME_GAP = 16;
 const CORNER_SWITCH_HYSTERESIS = 4;
 const GAP_EPSILON = 0.5;
@@ -66,10 +64,6 @@ interface MagnifierLayout {
   connector        : { from: ScreenPoint; to: ScreenPoint };
   placement        : number;
   connectorCorners : readonly [number, number];
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(Math.max(value, min), max);
 }
 
 function rectWidth(rect: ScreenRect): number {
@@ -228,16 +222,11 @@ function projectedImageBounds(
   const spatial  = state.physical?.spatial;
   if (!spatial) return viewport;
 
-  const origin = spatial.origin ?? [0, 0, 0];
-  const end: Vec3 = [
-    origin[0] + spatial.size[0],
-    origin[1] + spatial.size[1],
-    origin[2] + spatial.size[2],
-  ];
+  const { min, max } = physicalBounds(state);
   const projected: Array<readonly [number, number]> = [];
-  for (const x of [origin[0], end[0]]) {
-    for (const y of [origin[1], end[1]]) {
-      for (const z of [origin[2], end[2]]) {
+  for (const x of [min[0], max[0]]) {
+    for (const y of [min[1], max[1]]) {
+      for (const z of [min[2], max[2]]) {
         const point: Vec3 = [x, y, z];
         const screen = axisMap
           ? physicalToSliceScreen(point, state, axisMap, width, height)
@@ -290,11 +279,7 @@ export class MagnifierOverlay extends BaseOverlay {
   }
 
   protected override onMount(root: HTMLDivElement, _parent: HTMLElement): void {
-    const svg = document.createElementNS(SVG_NS, "svg");
-    svg.style.position      = "absolute";
-    svg.style.inset         = "0";
-    svg.style.width         = "100%";
-    svg.style.height        = "100%";
+    const svg = createFullscreenSvg();
     svg.style.pointerEvents = "none";
 
     const leader = document.createElementNS(SVG_NS, "line");
@@ -458,7 +443,7 @@ export class MagnifierOverlay extends BaseOverlay {
   /**
    * Create the nested Galavi instance on the overlay canvas. Async — an
    * unmount (or remount) racing the GPU init invalidates the result via
-   * `mountToken`, mirroring cerevi's magnifier token guard.
+   * `mountToken`.
    */
   private async mountNested(canvas: HTMLCanvasElement): Promise<void> {
     const owner    = this.getOwner();

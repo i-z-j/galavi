@@ -19,12 +19,16 @@ const HALF_FOV_TAN = Math.tan(DEFAULT_FOV / 2);
 // VECTOR HELPERS
 // ============================================================================
 
-function normalize(vector: Vec3): Vec3 {
+export function subtract(first: Vec3, second: Vec3): Vec3 {
+  return [first[0] - second[0], first[1] - second[1], first[2] - second[2]];
+}
+
+export function normalize(vector: Vec3): Vec3 {
   const length = Math.hypot(vector[0], vector[1], vector[2]) || 1;
   return [vector[0] / length, vector[1] / length, vector[2] / length];
 }
 
-function cross(first: Vec3, second: Vec3): Vec3 {
+export function cross(first: Vec3, second: Vec3): Vec3 {
   return [
     first[1] * second[2] - first[2] * second[1],
     first[2] * second[0] - first[0] * second[2],
@@ -32,11 +36,11 @@ function cross(first: Vec3, second: Vec3): Vec3 {
   ];
 }
 
-function dot(first: Vec3, second: Vec3): number {
+export function dot(first: Vec3, second: Vec3): number {
   return first[0] * second[0] + first[1] * second[1] + first[2] * second[2];
 }
 
-function cameraBasis(camera: { position: Vec3; target: Vec3; up?: Vec3 }): { forward: Vec3; right: Vec3; up: Vec3 } {
+export function cameraBasis(camera: { position: Vec3; target: Vec3; up?: Vec3 }): { forward: Vec3; right: Vec3; up: Vec3 } {
   const forward = normalize([
     camera.target[0] - camera.position[0],
     camera.target[1] - camera.position[1],

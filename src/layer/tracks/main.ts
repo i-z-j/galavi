@@ -11,7 +11,7 @@
  */
 
 import type { LayerConfig, Vec3 } from "../../types";
-import { EMPTY_VERTEX_BUFFER } from "../../utils";
+import { EMPTY_VERTEX_BUFFER, optArray, optNumber, optVec3 } from "../../utils";
 import {
   BaseLayer,
   MIN_VEC4_BUFFER,
@@ -47,6 +47,12 @@ export interface TracksConfig {
   graph?       : Record<number, number[]>;
 }
 
+/** Options accepted in `LayerConfig.options` for {@link TracksLayer}. */
+export type TracksOptions = TracksConfig;
+
+/** `LayerConfig` with the tracks layer's typed options bag. */
+export type TracksLayerConfig = LayerConfig<TracksOptions>;
+
 // ============================================================================
 // TRACKS PARAMETERS
 // ============================================================================
@@ -64,6 +70,10 @@ export class TracksLayerParams implements LayerParams {
     if (config?.currentTime !== undefined) this.currentTime = config.currentTime;
     if (config?.tailLength !== undefined) this.tailLength = config.tailLength;
     if (config?.tailWidth !== undefined) this.tailWidth = config.tailWidth;
+  }
+
+  setOpacity(opacity: number): void {
+    this.opacity = opacity;
   }
 
   // Layout: color(3f) + opacity(1f) + current_time(1f) + tail_length(1f) + tail_width(1f) + _pad(1f) = 8 floats = 32 bytes
@@ -87,15 +97,16 @@ export class TracksLayerParams implements LayerParams {
 
 export class TracksLayer extends BaseLayer {
   static readonly layerType = "tracks";
-  static fromConfig(id: string, desc: LayerConfig): TracksLayer {
+  static fromConfig(id: string, desc: TracksLayerConfig): TracksLayer {
+    const opts = desc.options ?? {};
     return new TracksLayer(id, {
-      tracks      : desc.options?.tracks as TrackPoint[] | undefined,
-      currentTime : desc.options?.currentTime as number | undefined,
-      tailLength  : desc.options?.tailLength as number | undefined,
-      tailWidth   : desc.options?.tailWidth as number | undefined,
-      color       : (desc.options?.color as Vec3) ?? undefined,
-      opacity     : desc.options?.opacity as number | undefined,
-      graph       : desc.options?.graph as Record<number, number[]> | undefined,
+      tracks      : optArray(opts.tracks, optTrackPoint),
+      currentTime : optNumber(opts.currentTime),
+      tailLength  : optNumber(opts.tailLength),
+      tailWidth   : optNumber(opts.tailWidth),
+      color       : optVec3(opts.color),
+      opacity     : optNumber(opts.opacity),
+      graph       : optGraph(opts.graph),
     });
   }
   protected override shaderCode = shaderCode;
@@ -109,7 +120,8 @@ export class TracksLayer extends BaseLayer {
 
   constructor(id?: string, config?: TracksConfig) {
     super(id);
-    this.params = new TracksLayerParams(config);
+    this.params  = new TracksLayerParams(config);
+    this.opacity = this.params.opacity;
     if (config?.tracks) {
       this._tracks = [...config.tracks];
     }
@@ -259,11 +271,35 @@ export class TracksLayer extends BaseLayer {
     };
   }
 
-  getParams(): LayerParams {
+  protected getLayerParams(): LayerParams {
     return this.params;
   }
 
   override getStorageData(): { data: Float32Array; label?: string } | null {
     return { data: this._gpuBuffer, label: `Tracks ${this.id} Data` };
   }
+}
+
+/** Structural check for one track point: numeric trackId/time + Vec3 position. */
+function optTrackPoint(value: unknown): TrackPoint | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const candidate = value as Partial<TrackPoint>;
+  const trackId   = optNumber(candidate.trackId);
+  const t         = optNumber(candidate.t);
+  const position  = optVec3(candidate.position);
+  return trackId !== undefined && t !== undefined && position
+    ? { trackId, t, position }
+    : undefined;
+}
+
+/** Structural check for the lineage graph: numeric keys, number-array values. */
+function optGraph(value: unknown): Record<number, number[]> | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const out: Record<number, number[]> = {};
+  for (const [key, parents] of Object.entries(value)) {
+    const ids = optArray(parents, optNumber);
+    if (!ids) return undefined;
+    out[Number(key)] = ids;
+  }
+  return out;
 }

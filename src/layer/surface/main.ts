@@ -15,6 +15,8 @@ import type {
 } from "../../types";
 import {
   UNIT_CUBE,
+  optBoolean,
+  optVec3,
   parseHexColor,
   sourceChanged,
   aabbFromPositions,
@@ -206,11 +208,27 @@ export interface SurfaceConfig {
   bounds?        : AABB;
 }
 
+/**
+ * Options accepted in `LayerConfig.options` for {@link SurfaceLayer}.
+ * `dataSize` maps to the constructor config's `size`.
+ */
+export interface SurfaceOptions extends Omit<SurfaceConfig, "source" | "size"> {
+  /** Volume dimensions [width, height, depth] */
+  dataSize? : Vec3;
+}
+
+/** `LayerConfig` with the surface layer's typed options bag. */
+export type SurfaceLayerConfig = LayerConfig<SurfaceOptions>;
+
 export class SurfaceLayerParams implements LayerParams {
   color        : Vec3 = [0.6, 0.6, 0.6];
   opacity                = 1.0;
   wireframe              = false;
   doubleSided            = false;
+
+  setOpacity(opacity: number): void {
+    this.opacity = opacity;
+  }
 
   // Layout matches shader SurfaceParams struct:
   // color(3f), opacity(1f), flags(1u), _pad(3f) = 8 values = 32 bytes
@@ -237,12 +255,13 @@ let warnedLargeAABB = false;
 
 export class SurfaceLayer extends BaseLayer {
   static readonly layerType = "surface";
-  static fromConfig(id: string, desc: LayerConfig): SurfaceLayer {
+  static fromConfig(id: string, desc: SurfaceLayerConfig): SurfaceLayer {
+    const opts = desc.options ?? {};
     return new SurfaceLayer(id, {
       source        : desc.data,
-      size          : (desc.options?.dataSize as Vec3) ?? undefined,
-      fitToUnitAABB : desc.options?.fitToUnitAABB as boolean | undefined,
-      bounds        : desc.options?.bounds as AABB | undefined,
+      size          : optVec3(opts.dataSize),
+      fitToUnitAABB : optBoolean(opts.fitToUnitAABB),
+      bounds        : optAABB(opts.bounds),
     });
   }
   private params           : SurfaceLayerParams;
@@ -281,7 +300,6 @@ export class SurfaceLayer extends BaseLayer {
       const rgb = parseHexColor(render.color);
       if (rgb) this.params.color = rgb;
     }
-    this.params.opacity     = this.opacity;
     this.params.wireframe   = render?.wireframe   ?? false;
     this.params.doubleSided = render?.doubleSided ?? false;
     this.isWireframe        = this.params.wireframe;
@@ -526,7 +544,16 @@ export class SurfaceLayer extends BaseLayer {
     };
   }
 
-  getParams(): LayerParams {
+  protected getLayerParams(): LayerParams {
     return this.params;
   }
+}
+
+/** Structural check for user-specified bounds: Vec3 min + Vec3 max. */
+function optAABB(value: unknown): AABB | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const candidate = value as Partial<AABB>;
+  const min = optVec3(candidate.min);
+  const max = optVec3(candidate.max);
+  return min && max ? { min, max } : undefined;
 }

@@ -12,7 +12,7 @@ import type {
   LayerConfig,
   Vec3,
 } from "../../types";
-import { EMPTY_VERTEX_BUFFER } from "../../utils";
+import { EMPTY_VERTEX_BUFFER, optBoolean, optNumber, optVec3 } from "../../utils";
 import {
   BaseLayer,
   MIN_VEC4_BUFFER,
@@ -48,6 +48,12 @@ export interface SegmentationConfig {
   height?           : number;
 }
 
+/** Options accepted in `LayerConfig.options` for {@link SegmentationLayer}. */
+export type SegmentationOptions = Omit<SegmentationConfig, "source">;
+
+/** `LayerConfig` with the segmentation layer's typed options bag. */
+export type SegmentationLayerConfig = LayerConfig<SegmentationOptions>;
+
 // ============================================================================
 // SEGMENTATION PARAMETERS
 // ============================================================================
@@ -69,6 +75,10 @@ export class SegmentationLayerParams implements LayerParams {
     if (config?.numLabels !== undefined) this.numLabels = config.numLabels;
     if (config?.width !== undefined) this.dataWidth = config.width;
     if (config?.height !== undefined) this.dataHeight = config.height;
+  }
+
+  setOpacity(opacity: number): void {
+    this.opacity = opacity;
   }
 
   // Layout: opacity(1f) + selected_label(1i) + shape(1f) + show_selected(1f)
@@ -96,18 +106,19 @@ export class SegmentationLayerParams implements LayerParams {
 
 export class SegmentationLayer extends BaseLayer {
   static readonly layerType = "segmentation";
-  static fromConfig(id: string, desc: LayerConfig): SegmentationLayer {
+  static fromConfig(id: string, desc: SegmentationLayerConfig): SegmentationLayer {
+    const opts = desc.options ?? {};
     return new SegmentationLayer(id, {
       source           : desc.data,
-      dataSize         : (desc.options?.dataSize as Vec3) ?? undefined,
-      numLabels        : desc.options?.numLabels as number | undefined,
-      selectedLabel    : desc.options?.selectedLabel as number | undefined,
-      shape            : desc.options?.shape as number | undefined,
-      showSelectedOnly : desc.options?.showSelectedOnly as boolean | undefined,
-      opacity          : desc.options?.opacity as number | undefined,
-      data             : desc.options?.data as Uint32Array | undefined,
-      width            : desc.options?.width as number | undefined,
-      height           : desc.options?.height as number | undefined,
+      dataSize         : optVec3(opts.dataSize),
+      numLabels        : optNumber(opts.numLabels),
+      selectedLabel    : optNumber(opts.selectedLabel),
+      shape            : optNumber(opts.shape),
+      showSelectedOnly : optBoolean(opts.showSelectedOnly),
+      opacity          : optNumber(opts.opacity),
+      data             : opts.data instanceof Uint32Array ? opts.data : undefined,
+      width            : optNumber(opts.width),
+      height           : optNumber(opts.height),
     });
   }
   protected override shaderCode = shaderCode;
@@ -117,7 +128,8 @@ export class SegmentationLayer extends BaseLayer {
 
   constructor(id?: string, config?: SegmentationConfig) {
     super(id);
-    this.params = new SegmentationLayerParams(config);
+    this.params  = new SegmentationLayerParams(config);
+    this.opacity = this.params.opacity;
     if (config?.data) {
       this.setData(config.data, config.width ?? 0, config.height ?? 0);
     }
@@ -156,15 +168,20 @@ export class SegmentationLayer extends BaseLayer {
     super.applyOptions(desc);
     const opts = desc.options;
     if (!opts) return;
-    if (opts.numLabels !== undefined)        this.params.numLabels        = opts.numLabels as number;
-    if (opts.selectedLabel !== undefined)    this.setSelectedLabel(opts.selectedLabel as number);
-    if (opts.shape !== undefined)            this.setShape(opts.shape as number);
-    if (opts.showSelectedOnly !== undefined) this.setShowSelectedOnly(opts.showSelectedOnly as boolean);
-    if (opts.opacity !== undefined)          this.opacity = opts.opacity as number;
-    if (opts.data !== undefined) {
-      const data   = opts.data as Uint32Array;
-      const width  = (opts.width  as number | undefined) ?? this.params.dataWidth;
-      const height = (opts.height as number | undefined) ?? this.params.dataHeight;
+    const numLabels        = optNumber(opts.numLabels);
+    const selectedLabel    = optNumber(opts.selectedLabel);
+    const shape            = optNumber(opts.shape);
+    const showSelectedOnly = optBoolean(opts.showSelectedOnly);
+    const opacity          = optNumber(opts.opacity);
+    if (numLabels !== undefined)        this.params.numLabels = numLabels;
+    if (selectedLabel !== undefined)    this.setSelectedLabel(selectedLabel);
+    if (shape !== undefined)            this.setShape(shape);
+    if (showSelectedOnly !== undefined) this.setShowSelectedOnly(showSelectedOnly);
+    if (opacity !== undefined)          this.opacity = opacity;
+    if (opts.data instanceof Uint32Array) {
+      const data   = opts.data;
+      const width  = optNumber(opts.width)  ?? this.params.dataWidth;
+      const height = optNumber(opts.height) ?? this.params.dataHeight;
       if (data !== this._data || width !== this.params.dataWidth || height !== this.params.dataHeight) {
         this.setData(data, width, height);
       }
@@ -184,7 +201,7 @@ export class SegmentationLayer extends BaseLayer {
     };
   }
 
-  getParams(): LayerParams {
+  protected getLayerParams(): LayerParams {
     return this.params;
   }
 

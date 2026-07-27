@@ -9,7 +9,7 @@
  */
 
 import type { LayerConfig, Vec3 } from "../../types";
-import { EMPTY_VERTEX_BUFFER } from "../../utils";
+import { EMPTY_VERTEX_BUFFER, optArray, optNumber, optVec3 } from "../../utils";
 import {
   BaseLayer,
   MIN_VEC4_BUFFER,
@@ -40,6 +40,12 @@ export interface VectorsConfig {
   opacity?   : number;
 }
 
+/** Options accepted in `LayerConfig.options` for {@link VectorsLayer}. */
+export type VectorsOptions = VectorsConfig;
+
+/** `LayerConfig` with the vectors layer's typed options bag. */
+export type VectorsLayerConfig = LayerConfig<VectorsOptions>;
+
 // ============================================================================
 // VECTORS PARAMETERS
 // ============================================================================
@@ -55,6 +61,10 @@ export class VectorsLayerParams implements LayerParams {
     if (config?.opacity !== undefined) this.opacity = config.opacity;
     if (config?.length !== undefined) this.length = config.length;
     if (config?.edgeWidth !== undefined) this.edgeWidth = config.edgeWidth;
+  }
+
+  setOpacity(opacity: number): void {
+    this.opacity = opacity;
   }
 
   // Layout: color(3f) + opacity(1f) + length(1f) + edge_width(1f) + _pad(2f) = 8 floats = 32 bytes
@@ -77,13 +87,14 @@ export class VectorsLayerParams implements LayerParams {
 
 export class VectorsLayer extends BaseLayer {
   static readonly layerType = "vectors";
-  static fromConfig(id: string, desc: LayerConfig): VectorsLayer {
+  static fromConfig(id: string, desc: VectorsLayerConfig): VectorsLayer {
+    const opts = desc.options ?? {};
     return new VectorsLayer(id, {
-      vectors   : desc.options?.vectors as VectorEntry[] | undefined,
-      color     : (desc.options?.color as Vec3) ?? undefined,
-      edgeWidth : desc.options?.edgeWidth as number | undefined,
-      length    : desc.options?.length as number | undefined,
-      opacity   : desc.options?.opacity as number | undefined,
+      vectors   : optArray(opts.vectors, optVectorEntry),
+      color     : optVec3(opts.color),
+      edgeWidth : optNumber(opts.edgeWidth),
+      length    : optNumber(opts.length),
+      opacity   : optNumber(opts.opacity),
     });
   }
   protected override shaderCode = shaderCode;
@@ -93,7 +104,8 @@ export class VectorsLayer extends BaseLayer {
 
   constructor(id?: string, config?: VectorsConfig) {
     super(id);
-    this.params = new VectorsLayerParams(config);
+    this.params  = new VectorsLayerParams(config);
+    this.opacity = this.params.opacity;
     if (config?.vectors) {
       this._vectors = [...config.vectors];
     }
@@ -182,11 +194,20 @@ export class VectorsLayer extends BaseLayer {
     };
   }
 
-  getParams(): LayerParams {
+  protected getLayerParams(): LayerParams {
     return this.params;
   }
 
   override getStorageData(): { data: Float32Array; label?: string } | null {
     return { data: this._gpuBuffer, label: `Vectors ${this.id} Data` };
   }
+}
+
+/** Structural check for one vector entry: Vec3 start + Vec3 direction. */
+function optVectorEntry(value: unknown): VectorEntry | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const candidate = value as Partial<VectorEntry>;
+  const start     = optVec3(candidate.start);
+  const direction = optVec3(candidate.direction);
+  return start && direction ? { start, direction } : undefined;
 }

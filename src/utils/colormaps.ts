@@ -233,30 +233,6 @@ export const APPEARANCE_PRESETS = {
     description : "Vivid scalar preset.",
     colormap    : "turbo",
   },
-  "ct-bone": {
-    label           : "CT Bone",
-    description     : "Bright window for dense structures.",
-    colormap        : "gray",
-    contrastLimits  : [0.55, 1],
-  },
-  "ct-soft-tissue": {
-    label           : "CT Soft Tissue",
-    description     : "Mid-range window for soft-tissue inspection.",
-    colormap        : "gray",
-    contrastLimits  : [0.08, 0.42],
-  },
-  angiography: {
-    label           : "Angiography",
-    description     : "Vessel-emphasized warm ramp.",
-    color           : "#FFB347",
-    contrastLimits  : [0.72, 1],
-  },
-  "mri-soft-tissue": {
-    label           : "MRI Soft Tissue",
-    description     : "Broad grayscale window for MRI-style volumes.",
-    colormap        : "gray",
-    contrastLimits  : [0.12, 0.82],
-  },
   "simulation-scalar": {
     label           : "Simulation Scalar",
     description     : "Colorful scalar preset for simulation fields.",

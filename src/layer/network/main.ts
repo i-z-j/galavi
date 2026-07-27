@@ -10,7 +10,7 @@
  */
 
 import type { LayerConfig, Vec3 } from "../../types";
-import { EMPTY_VERTEX_BUFFER } from "../../utils";
+import { EMPTY_VERTEX_BUFFER, optArray, optNumber, optVec2, optVec3 } from "../../utils";
 import {
   BaseLayer,
   type LayerParams,
@@ -41,6 +41,12 @@ export interface NetworkConfig {
   opacity?    : number;
 }
 
+/** Options accepted in `LayerConfig.options` for {@link NetworkLayer}. */
+export type NetworkOptions = NetworkConfig;
+
+/** `LayerConfig` with the network layer's typed options bag. */
+export type NetworkLayerConfig = LayerConfig<NetworkOptions>;
+
 // ============================================================================
 // NETWORK PARAMETERS
 // ============================================================================
@@ -59,6 +65,10 @@ export class NetworkLayerParams implements LayerParams {
     if (config?.nodeSize !== undefined) this.nodeSize = config.nodeSize;
     if (config?.edgeColor) this.edgeColor = config.edgeColor;
     if (config?.opacity !== undefined) this.opacity = config.opacity;
+  }
+
+  setOpacity(opacity: number): void {
+    this.opacity = opacity;
   }
 
   // Layout: node_color(3f) + node_size(1f) + edge_color(3f) + opacity(1f)
@@ -89,15 +99,16 @@ export class NetworkLayerParams implements LayerParams {
 
 export class NetworkLayer extends BaseLayer {
   static readonly layerType = "network";
-  static fromConfig(id: string, desc: LayerConfig): NetworkLayer {
+  static fromConfig(id: string, desc: NetworkLayerConfig): NetworkLayer {
+    const opts = desc.options ?? {};
     return new NetworkLayer(id, {
-      nodes     : (desc.options?.nodes as Vec3[]) ?? undefined,
-      edges     : desc.options?.edges as [number, number][] | undefined,
-      nodeSize  : desc.options?.nodeSize as number | undefined,
-      nodeColor : (desc.options?.nodeColor as Vec3) ?? undefined,
-      edgeColor : (desc.options?.edgeColor as Vec3) ?? undefined,
-      edgeWidth : desc.options?.edgeWidth as number | undefined,
-      opacity   : desc.options?.opacity as number | undefined,
+      nodes     : optArray(opts.nodes, optVec3),
+      edges     : optArray(opts.edges, optVec2),
+      nodeSize  : optNumber(opts.nodeSize),
+      nodeColor : optVec3(opts.nodeColor),
+      edgeColor : optVec3(opts.edgeColor),
+      edgeWidth : optNumber(opts.edgeWidth),
+      opacity   : optNumber(opts.opacity),
     });
   }
   private params      : NetworkLayerParams;
@@ -108,7 +119,8 @@ export class NetworkLayer extends BaseLayer {
 
   constructor(id?: string, config?: NetworkConfig) {
     super(id);
-    this.params = new NetworkLayerParams(config);
+    this.params  = new NetworkLayerParams(config);
+    this.opacity = this.params.opacity;
     if (config?.nodes) this._nodes = config.nodes.map(n => [...n] as Vec3);
     if (config?.edges) this._edges = config.edges.map(e => [...e] as [number, number]);
     this.rebuildBuffer();
@@ -261,7 +273,7 @@ export class NetworkLayer extends BaseLayer {
     };
   }
 
-  getParams(): LayerParams {
+  protected getLayerParams(): LayerParams {
     return this.params;
   }
 

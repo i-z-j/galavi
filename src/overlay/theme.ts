@@ -1,5 +1,5 @@
 /**
- * Galavi Theme — unified FUI (sci-fi HUD) visual theme for overlays and apps.
+ * Galavi Theme — unified visual theme for overlays and apps.
  *
  * The theme is a plain data object. Overlays receive it through
  * `OverlayBinding.getTheme()` (resolved from `GalaviConfig.theme`) and MAY
@@ -8,9 +8,10 @@
  * overlay inline styles reference `var(--galavi-*)`, so restyling never
  * requires a stylesheet and apps can still override from CSS.
  *
- * Apps (e.g. cerevi-web) import `FUI_THEME` / `applyThemeTo` from the package
- * root and call `applyThemeTo(appRoot)` once so Vue-rendered UI shares the
- * exact same palette — a single source of truth.
+ * `DEFAULT_THEME` is the neutral, domain-free built-in default. `FUI_THEME`
+ * and `PRECISION_THEME` are opt-in presets. Apps import a preset /
+ * `applyThemeTo` from the package root and call `applyThemeTo(appRoot)` once
+ * so app-rendered UI shares the exact same palette — a single source of truth.
  */
 
 // ============================================================================
@@ -38,7 +39,20 @@ export interface GalaviTheme {
   fontSize    : string;
 }
 
-/** Default FUI theme — cyan/amber holographic HUD on dark glass. */
+/** Default theme — neutral monochrome chrome, no domain identity. */
+export const DEFAULT_THEME: GalaviTheme = {
+  accent      : "#E0E0E0",
+  accentSoft  : "rgba(224, 224, 224, 0.18)",
+  warn        : "#FFC966",
+  text        : "#F0F0F0",
+  textDim     : "#9A9A9A",
+  panelBg     : "rgba(16, 16, 16, 0.72)",
+  border      : "rgba(255, 255, 255, 0.22)",
+  fontMono    : "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+  fontSize    : "11px",
+};
+
+/** FUI preset — cyan/amber holographic HUD on dark glass. */
 export const FUI_THEME: GalaviTheme = {
   accent      : "#46E6FF",
   accentSoft  : "rgba(70, 230, 255, 0.28)",
@@ -51,7 +65,7 @@ export const FUI_THEME: GalaviTheme = {
   fontSize    : "11px",
 };
 
-/** Precision theme — monochrome, low-decoration chrome for analytical work. */
+/** Precision preset — monochrome, low-decoration chrome for analytical work. */
 export const PRECISION_THEME: GalaviTheme = {
   accent      : "#F5F5F5",
   accentSoft  : "rgba(255, 255, 255, 0.10)",
@@ -68,9 +82,9 @@ export type DeepPartial<T> = {
   [K in keyof T]?: T[K] extends object ? DeepPartial<T[K]> : T[K];
 };
 
-/** Resolve a partial theme over the FUI defaults. */
+/** Resolve a partial theme over the default theme. */
 export function resolveTheme(partial?: DeepPartial<GalaviTheme>): GalaviTheme {
-  return mergeTheme(FUI_THEME, partial);
+  return mergeTheme(DEFAULT_THEME, partial);
 }
 
 /** Merge a partial theme over a complete base theme (all fields are scalar). */

@@ -10,25 +10,21 @@
 import type { State, Vec3 } from "../types";
 import {
   BaseView,
-  SCENE_UNIFORM_SIZE,
   type Scene,
 } from "./base";
 import { ImagePipeline } from "./runtime";
 import {
-  DEPTH_FORMAT,
   DEFAULT_FOV,
   NEAR_CLIP_FACTOR,
   FAR_CLIP_FACTOR,
   MODE_TRANSITION_MS,
   VOLUME_RAY_SAMPLE_COUNT,
 } from "../defaults";
-import { physicalToVolumeScreen } from "../utils";
+import { cameraBasis, dot, physicalToVolumeScreen, subtract } from "../utils";
 
 export class VolumeView extends BaseView {
   static readonly viewType = "volume";
   private cameraBuffer! : GPUBuffer;
-  private depthTexture? : GPUTexture;
-  private pipeline!     : ImagePipeline;
 
   private lastMode?      : string;
   private lastScene?     : Scene;
@@ -41,11 +37,7 @@ export class VolumeView extends BaseView {
   };
 
   protected async initGPUResources(): Promise<void> {
-    this.cameraBuffer = this.device.createBuffer({
-      label: "VolumeView Camera Buffer",
-      size : SCENE_UNIFORM_SIZE,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
+    this.cameraBuffer = this.createCameraBuffer("VolumeView Camera Buffer");
 
     const textureSampler = this.device.createSampler({
       label       : "VolumeView Texture Sampler",
@@ -77,26 +69,6 @@ export class VolumeView extends BaseView {
     });
 
     this.registerDOMEvents();
-  }
-
-  protected onLayersChanged(): void {
-    this.pipeline?.markDirty();
-  }
-
-  override getCurrentLevel(layerId: string): number | undefined {
-    return this.pipeline?.getCurrentLevel(layerId);
-  }
-
-  override getResolution(layerId: string) {
-    return this.pipeline?.getResolution(layerId);
-  }
-
-  protected override onCanvasFormatChanged(): void {
-    this.pipeline?.markDirty();
-  }
-
-  protected override onViewportChanged(): void {
-    this.pipeline?.resetResolutionSelection();
   }
 
   protected renderFrame(state: State): void {
@@ -153,19 +125,7 @@ export class VolumeView extends BaseView {
     this.device.queue.writeBuffer(this.cameraBuffer, 0, cameraData as unknown as ArrayBuffer);
 
     // Depth texture (lazy resize)
-    if (
-      !this.depthTexture ||
-      this.depthTexture.width !== this.canvas.width ||
-      this.depthTexture.height !== this.canvas.height
-    ) {
-      this.depthTexture?.destroy();
-      this.depthTexture = this.device.createTexture({
-        label : "VolumeView Depth Texture",
-        size  : [this.canvas.width, this.canvas.height],
-        format: DEPTH_FORMAT,
-        usage : GPUTextureUsage.RENDER_ATTACHMENT,
-      });
-    }
+    const depthTexture = this.ensureDepthTexture("VolumeView Depth Texture");
 
     // Per-layer params (with eye in local space) + model uniforms
     this.pipeline.writeFrameUniforms(this.layerEntries, (layer) => {
@@ -176,32 +136,13 @@ export class VolumeView extends BaseView {
       }
     });
 
-    const encoder = this.device.createCommandEncoder();
-    const pass    = encoder.beginRenderPass({
-      colorAttachments: [{
-        view      : this.context.getCurrentTexture().createView(),
-        clearValue: [0, 0, 0, 1],
-        loadOp    : "clear",
-        storeOp   : "store",
-      }],
-      depthStencilAttachment: {
-        view           : this.depthTexture.createView(),
-        depthClearValue: 1.0,
-        depthLoadOp    : "clear",
-        depthStoreOp   : "store",
-      },
-    });
-
-    this.pipeline.draw(pass, this.layerEntries);
-
-    pass.end();
-    this.device.queue.submit([encoder.finish()]);
+    this.encodeFrame(
+      (pass) => this.pipeline.draw(pass, this.layerEntries),
+      depthTexture,
+    );
   }
 
   protected override onDestroy(): void {
-    this.pipeline?.destroy();
-    this.depthTexture?.destroy();
-    this.depthTexture  = undefined;
     this.renderedScene = undefined;
   }
 
@@ -296,12 +237,10 @@ function frustumSegmentCorners(
   aspect : number,
   bounds : { min: Vec3; max: Vec3 },
 ): { corners: Vec3[]; nearDepth: number } | undefined {
-  const forward = normalize3(subtract3(camera.target, camera.position));
-  const right   = normalize3(cross3(forward, camera.up));
-  const up      = normalize3(cross3(right, forward));
+  const { forward, right, up } = cameraBasis(camera);
   const boundsCorners = boxCorners(bounds.min, bounds.max);
   const depths = boundsCorners.map((corner) => (
-    dot3(subtract3(corner, camera.position), forward)
+    dot(subtract(corner, camera.position), forward)
   ));
   const farDepth = Math.min(camera.far, Math.max(...depths));
   if (farDepth <= camera.near) return undefined;
@@ -340,25 +279,4 @@ function boxCorners(min: Vec3, max: Vec3): Vec3[] {
     }
   }
   return corners;
-}
-
-function subtract3(a: Vec3, b: Vec3): Vec3 {
-  return [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
-}
-
-function cross3(a: Vec3, b: Vec3): Vec3 {
-  return [
-    a[1] * b[2] - a[2] * b[1],
-    a[2] * b[0] - a[0] * b[2],
-    a[0] * b[1] - a[1] * b[0],
-  ];
-}
-
-function dot3(a: Vec3, b: Vec3): number {
-  return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-}
-
-function normalize3(value: Vec3): Vec3 {
-  const length = Math.hypot(value[0], value[1], value[2]) || 1;
-  return [value[0] / length, value[1] / length, value[2] / length];
 }

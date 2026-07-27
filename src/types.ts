@@ -3,6 +3,11 @@
  */
 
 import type { DeepPartial, GalaviTheme } from "./overlay/theme";
+import type {
+  FlyControlOptions,
+  OrbitControlOptions,
+  PanZoomControlOptions,
+} from "./control";
 
 // ============================================================================
 // PRIMITIVES
@@ -29,7 +34,7 @@ export interface GalaviConfig {
   state : State;
   /** View configurations keyed by view name */
   views : Record<string, ViewConfig>;
-  /** Overlay UI theme override, merged over the built-in FUI theme */
+  /** Overlay UI theme override, merged over the default theme */
   theme?: DeepPartial<GalaviTheme>;
 }
 
@@ -44,7 +49,7 @@ export interface GalaviConfig {
  * This is what gets serialized and restored.
  */
 export interface State {
-  /** Physical coordinate system (optional — defaults to normalized [0,1]³ µm space) */
+  /** Physical coordinate system (optional — defaults to normalized [0,1]³ unitless space) */
   physical?     : PhysicalSpace;
   /** Ordered layer list (first = bottom, last = top) */
   layers        : LayerConfig[];
@@ -53,10 +58,23 @@ export interface State {
 }
 
 /**
- * View configuration — defines a single view within a Galavi instance
+ * Control option bags keyed by control type. The built-in control types
+ * (orbit / fly / panzoom) carry their typed options; custom control types
+ * registered via `registerControl` accept any options bag.
+ */
+export type ControlOptions = {
+  [type: string]: Record<string, unknown> | undefined;
+} & {
+  orbit?   : OrbitControlOptions;
+  fly?     : FlyControlOptions;
+  panzoom? : PanZoomControlOptions;
+};
+
+/**
+ * View configuration — defines a single view within a Galavi instance.
+ * Views are keyed by name in `GalaviConfig.views`; the key is the view ID.
  */
 export interface ViewConfig {
-  id?           : ID; // Optional view ID (auto-generated if omitted)
   /** View type */
   type          : string;
   /** Canvas element to render into. Omit for delayed mounting via galavi.mount(). */
@@ -64,7 +82,7 @@ export interface ViewConfig {
   /** Layers (IDs) to render in this view (must match IDs in state.layers) */
   layers        : ID[];
   /** Controls to attach, keyed by control type (e.g. { orbit: {}, fly: {} }) */
-  controls?     : Record<string, Record<string, unknown>>;
+  controls?     : ControlOptions;
   /** Overlays to attach, keyed by overlay type (e.g. { crosshair: {}, ruler: { visible: false } }) */
   overlays?     : Record<string, Record<string, unknown>>;
   /** Human-readable label for this view */
@@ -77,6 +95,13 @@ export interface ViewConfig {
    * user input (mouse down / key down).
    */
   autoRotate?   : boolean | { speedDegPerSec?: number };
+  /**
+   * Automatically track canvas content-box resizes with a ResizeObserver and
+   * re-render (default: true). The view owns the observer for the lifetime of
+   * its canvas binding; set to `false` only when the host drives canvas pixel
+   * sizing itself and wants no observer.
+   */
+  autoResize?   : boolean;
 }
 
 // ===========================================================================
@@ -98,9 +123,17 @@ export interface PhysicalSpace {
 }
 
 /**
- * Layer config — defines a data layer
+ * Layer config — defines a data layer.
+ *
+ * `TOptions` types the `options` bag; per-layer aliases (e.g. `VolumeLayerConfig`,
+ * `SliceLayerConfig`) wire each built-in layer's option interface, while plain
+ * `LayerConfig` accepts any option bag.
+ *
+ * Config-boundary policy: unknown option keys are ignored, and a key whose
+ * runtime value has the wrong type is treated as absent (the layer default
+ * applies). Checked readers live in `utils/options.ts`.
  */
-export interface LayerConfig {
+export interface LayerConfig<TOptions = Record<string, unknown>> {
   /** Layer ID */
   id        : ID;
   /** Layer type */
@@ -110,7 +143,7 @@ export interface LayerConfig {
   /** Render configuration */
   render?   : Render;
   /** Type-specific options (includes selection: { c?, ... }) */
-  options?  : Record<string, unknown>;
+  options?  : TOptions;
 }
 
 /**
@@ -131,7 +164,7 @@ export interface Exploration {
 export interface SpatialConfig {
   /** Physical bounding box extent [x,y,z] (default [1,1,1], a.k.a [0,1]³ space) */
   size        : Vec3;
-  /** Physical unit (default 'µm') */
+  /** Physical unit label (optional — unitless when omitted) */
   unit?       : PhysicalUnit | (string & {});
   /** Voxel size [x,y,z] in physical units (for resolution selection, ruler) */
   spacing?    : Vec3;

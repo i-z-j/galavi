@@ -9,10 +9,11 @@
  * styling, position). View-local presentation is NOT part of the portable
  * `State` document and does not round-trip through `getState()`.
  *
- * Theming: overlays render with the galavi FUI theme. `BaseOverlay` resolves
- * the theme (global `GalaviConfig.theme` merged with the per-overlay `theme`
- * option) and writes it as `--galavi-*` CSS custom properties on the overlay
- * root; inline styles reference `var(--galavi-*)`.
+ * Theming: overlays render with the resolved galavi theme. `BaseOverlay`
+ * resolves the theme (global `GalaviConfig.theme` merged with the per-overlay
+ * `theme` option, over the neutral `DEFAULT_THEME`) and writes it as
+ * `--galavi-*` CSS custom properties on the overlay root; inline styles
+ * reference `var(--galavi-*)`.
  */
 
 import type { State, Vec2, Vec3 } from "../types";
@@ -20,7 +21,7 @@ import type { Galavi } from "../main";
 import type { AxisMap } from "../utils/axes";
 import {
   applyThemeTo,
-  FUI_THEME,
+  DEFAULT_THEME,
   mergeTheme,
   type DeepPartial,
   type GalaviTheme,
@@ -63,7 +64,7 @@ export abstract class BaseOverlay {
   private visibleWhenActive = false;
 
   private themePartial?  : DeepPartial<GalaviTheme>;
-  private resolvedTheme  : GalaviTheme = FUI_THEME;
+  private resolvedTheme  : GalaviTheme = DEFAULT_THEME;
 
   bindView(binding: OverlayBinding): void {
     this.binding = binding;
@@ -318,7 +319,7 @@ export abstract class BaseOverlay {
 
   /** Resolve global binding theme + per-overlay override and (re)apply to root. */
   private updateTheme(): void {
-    const base = this.binding?.getTheme() ?? FUI_THEME;
+    const base = this.binding?.getTheme() ?? DEFAULT_THEME;
     this.resolvedTheme = mergeTheme(base, this.themePartial);
     if (this.root) applyThemeTo(this.root, this.resolvedTheme);
   }

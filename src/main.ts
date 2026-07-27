@@ -39,16 +39,22 @@ import { vec3 } from "wgpu-matrix";
 // GALAVI CLASS
 // ============================================================================
 
-type LayerAccessor = {
-  readonly config: LayerConfig;
+type LayerAccessor<TOptions = Record<string, unknown>> = {
+  readonly config: LayerConfig<TOptions>;
   setRender(partial: Partial<Render>): void;
-  setOptions(partial: Record<string, unknown>): void;
+  setOptions(partial: Partial<TOptions>): void;
   setData(partial: Partial<Data>): void;
 };
 
 type ViewAccessor = {
   setOverlayOptions(overlayType: string, opts: Record<string, unknown>): void;
   getLayer(id: ID): BaseLayer | undefined;
+  /**
+   * Resolve once the layer reports `isReady` (see `BaseView.whenLayerReady`
+   * for the full semantics). Rejects when the layer ID is unknown in this
+   * view, when `opts.signal` aborts, or when the layer/view goes away.
+   */
+  whenLayerReady(layerId: ID, opts?: { signal?: AbortSignal }): Promise<BaseLayer>;
   getCurrentLevel(layerId: ID): number | undefined;
   getResolution(layerId: ID): ViewResolution | undefined;
   readonly config: ViewConfig;
@@ -208,7 +214,7 @@ export class Galavi {
   }
 
   /** Get a layer handle by ID, or undefined if not found. */
-  layer(id: ID): LayerAccessor | undefined {
+  layer<TOptions = Record<string, unknown>>(id: ID): LayerAccessor<TOptions> | undefined {
     if (!this._layers.some(l => l.id === id)) return undefined;
     const self = this;
 
@@ -225,24 +231,24 @@ export class Galavi {
     };
 
     return {
-      get config(): LayerConfig {
+      get config(): LayerConfig<TOptions> {
         const entry = self._layers.find(l => l.id === id)!;
         return {
           ...entry,
           render  : entry.render  ? { ...entry.render }  : undefined,
           options : entry.options ? { ...entry.options } : undefined,
           data    : entry.data    ? { ...entry.data }    : undefined,
-        };
+        } as LayerConfig<TOptions>;
       },
       setRender(partial: Partial<Render>): void {
         updateLayer((layer) => {
           layer.render = { ...(layer.render ?? {}), ...partial };
         });
       },
-      setOptions(partial: Record<string, unknown>): void {
+      setOptions(partial: Partial<TOptions>): void {
         updateLayer((layer) => {
           if (!layer.options) layer.options = {};
-          for (const [key, value] of Object.entries(partial)) {
+          for (const [key, value] of Object.entries(partial as Record<string, unknown>)) {
             const existing = layer.options[key];
             if (
               existing && typeof existing === "object" && !Array.isArray(existing) &&
@@ -335,6 +341,15 @@ export class Galavi {
         this.requestRender();
       },
       getLayer: (id: ID) => vr.layers.get(id),
+      whenLayerReady: (layerId: ID, opts?: { signal?: AbortSignal }) => {
+        const layer = vr.layers.get(layerId);
+        if (!layer) {
+          return Promise.reject(
+            new Error(`Layer "${layerId}" not found in view "${viewId}"`),
+          );
+        }
+        return vr.view.whenLayerReady(layer, opts?.signal);
+      },
       getCurrentLevel: (layerId: ID) => vr.view.getCurrentLevel(layerId),
       getResolution: (layerId: ID) => vr.view.getResolution(layerId),
       get config() {

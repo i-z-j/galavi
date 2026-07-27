@@ -12,7 +12,6 @@ import { cameraDistance, type AxisMap } from "../utils";
 import { SliceLayer } from "../layer";
 import {
   BaseView,
-  SCENE_UNIFORM_SIZE,
   type Scene,
 } from "./base";
 import { ImagePipeline } from "./runtime";
@@ -20,7 +19,6 @@ import { ImagePipeline } from "./runtime";
 export class SliceView extends BaseView {
   static readonly viewType = "slice";
   private cameraBuffer! : GPUBuffer;
-  private pipeline!     : ImagePipeline;
 
   /** Axis permutation, resolved from first slice layer or default xy. */
   private _axisMap?: AxisMap;
@@ -41,11 +39,7 @@ export class SliceView extends BaseView {
   }
 
   protected async initGPUResources(): Promise<void> {
-    this.cameraBuffer = this.device.createBuffer({
-      label: "SliceView Camera Buffer",
-      size : SCENE_UNIFORM_SIZE,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
+    this.cameraBuffer = this.createCameraBuffer("SliceView Camera Buffer");
 
     const textureSampler = this.device.createSampler({
       label    : "SliceView Texture Sampler",
@@ -73,26 +67,6 @@ export class SliceView extends BaseView {
     });
 
     this.registerDOMEvents();
-  }
-
-  protected onLayersChanged(): void {
-    this.pipeline?.markDirty();
-  }
-
-  override getCurrentLevel(layerId: string): number | undefined {
-    return this.pipeline?.getCurrentLevel(layerId);
-  }
-
-  override getResolution(layerId: string) {
-    return this.pipeline?.getResolution(layerId);
-  }
-
-  protected override onCanvasFormatChanged(): void {
-    this.pipeline?.markDirty();
-  }
-
-  protected override onViewportChanged(): void {
-    this.pipeline?.resetResolutionSelection();
   }
 
   protected renderFrame(state: State): void {
@@ -156,22 +130,7 @@ export class SliceView extends BaseView {
     this.device.queue.writeBuffer(this.cameraBuffer, 0, cameraData as unknown as ArrayBuffer);
     this.pipeline.writeFrameUniforms(this.layerEntries);
 
-    const encoder = this.device.createCommandEncoder();
-    const pass    = encoder.beginRenderPass({
-      colorAttachments: [{
-        view      : this.context.getCurrentTexture().createView(),
-        clearValue: [0, 0, 0, 1],
-        loadOp    : "clear",
-        storeOp   : "store",
-      }],
-    });
-    this.pipeline.draw(pass, this.layerEntries);
-    pass.end();
-    this.device.queue.submit([encoder.finish()]);
-  }
-
-  protected override onDestroy(): void {
-    this.pipeline?.destroy();
+    this.encodeFrame((pass) => this.pipeline.draw(pass, this.layerEntries));
   }
 
 }

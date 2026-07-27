@@ -4,31 +4,39 @@
  * Renders 2D slices (XY, YZ, XZ projections) from volumetric data.
  * Uses square geometry with 2D texture sampling.
  * Supports tile-based loading for large datasets.
+ *
+ * Shared tile plumbing lives in TiledImageLayer; this class carries only the
+ * 2D specifics (axis permutation, slice index, 2D plane grid, square geometry).
  */
 
 import type {
-  Data,
   ImagePyramid,
   LayerConfig,
   PhysicalSpace,
   Vec3,
 } from "../../types";
 import {
-  buildTileFetcher,
-  pickPyramidLevel,
-  planTiles,
+  optArray,
+  optAxis,
+  optNumber,
+  optNumberRecord,
+  optVec2,
   resolveAxes,
-  sourceChanged,
+  type AxisIndex,
   type AxisMap,
-  type TileFramePlan,
-  type TileSpec,
-  type TileViewport,
+  type TilePlacement,
+  type TilePlan,
 } from "../../utils";
 import {
-  BaseLayer,
   type Geometry,
   type LayerParams,
 } from "../base";
+import {
+  TiledImageLayer,
+  type TileLevelContext,
+  type TileLevelGrid,
+  type TiledImageOptions,
+} from "../tiled-image";
 import shaderCode from "./shader.wgsl?raw";
 
 // === Square Geometry ===
@@ -45,7 +53,7 @@ const SQUARE = new Float32Array([
 
 // === Slice Parameters ===
 
-export interface SliceConfig {
+export interface SliceConfig extends TiledImageOptions {
   /**
    * Axes defining the slice plane as [u, v].
    * Accepts strings ("x","y","z") or indices (0,1,2).
@@ -58,8 +66,6 @@ export interface SliceConfig {
    * Default: ["x","y"] (XY plane)
    */
   axes?          : (string | number)[];
-  /** Data source descriptor */
-  source?        : Data;
   /**
    * MIP thickness (voxels per slice along the slice axis).
    * Scalar — each slice entry is for one plane, so one value suffices.
@@ -70,11 +76,13 @@ export interface SliceConfig {
   contrastRange? : [number, number];
   /** Current slice index along the through-plane axis */
   sliceIndex?    : number;
-  /** Optional tile-atlas slot cap (default: derived from a 128 MiB budget) */
-  maxPoolSize?   : number;
-  /** Non-spatial dimension selection, e.g. { c: 0, t: 5 }. Substituted into urlTemplate or passed to source.fetch. */
-  selection?     : Record<string, number>;
 }
+
+/** Options accepted in `LayerConfig.options` for {@link SliceLayer}. */
+export type SliceOptions = Omit<SliceConfig, "source">;
+
+/** `LayerConfig` with the slice layer's typed options bag. */
+export type SliceLayerConfig = LayerConfig<SliceOptions>;
 
 export class SliceLayerParams implements LayerParams {
   private contrast       : [number, number] = [0, 1];
@@ -142,29 +150,20 @@ export class SliceLayerParams implements LayerParams {
 
 // === Slice Layer ===
 
-interface SliceTile {
-  gridIdx   : number;
-  voxelPos  : number[];
-  id        : string;
-  level     : number;
-  chunkSize : Vec3;
-  region    : { start: Vec3; size: Vec3 };
-}
-
-export class SliceLayer extends BaseLayer {
+export class SliceLayer extends TiledImageLayer {
   static readonly layerType = "slice";
-  static fromConfig(id: string, desc: LayerConfig): SliceLayer {
+  static fromConfig(id: string, desc: SliceLayerConfig): SliceLayer {
     const opts = desc.options ?? {};
     return new SliceLayer(
       id,
       {
         source        : desc.data,
-        axes          : (opts.axes as (string | number)[]) ?? undefined,
-        mipThickness  : opts.mipThickness as number | undefined,
-        selection     : opts.selection as Record<string, number> | undefined,
-        contrastRange : (opts.contrastRange as [number, number]) ?? undefined,
-        sliceIndex    : opts.sliceIndex as number | undefined,
-        maxPoolSize   : opts.maxPoolSize as number | undefined,
+        axes          : optArray(opts.axes, optAxis),
+        mipThickness  : optNumber(opts.mipThickness),
+        selection     : optNumberRecord(opts.selection),
+        contrastRange : optVec2(opts.contrastRange),
+        sliceIndex    : optNumber(opts.sliceIndex),
+        maxPoolSize   : optNumber(opts.maxPoolSize),
       },
     );
   }
@@ -183,44 +182,25 @@ export class SliceLayer extends BaseLayer {
   /** MIP thickness along the slice axis */
   readonly mipThickness : number;
 
-  private params : SliceLayerParams;
+  private params     : SliceLayerParams;
+  private sliceIndex : number;
 
   protected override applyOptions(desc: LayerConfig): void {
     super.applyOptions(desc);
-    if (desc.options?.sliceIndex !== undefined) {
-      this.setSliceIndex(desc.options.sliceIndex as number);
+    const sliceIndex = optNumber(desc.options?.sliceIndex);
+    if (sliceIndex !== undefined) {
+      this.setSliceIndex(sliceIndex);
     }
   }
-  private currentLevel : number;
-  override getCurrentLevel(): number {
-    return this.currentLevel;
-  }
-
-  override getLevelResolution(level: number): number | undefined {
-    const scale = this.source?.pyramid?.levels[level]?.scale;
-    if (!scale) return undefined;
-    return Math.max(scale[this.axisMap[0]], scale[this.axisMap[1]]);
-  }
-  private source?      : Data;
-  private maxPoolSize? : number;
-  private sliceIndex   : number;
-  private selection    : Record<string, number>;
-
-  // Viewport transform (world coords where viewport [0,1]² maps to)
-  private viewportOrigin : [number, number] = [0, 0];
-  private viewportSize   : [number, number] = [1, 1];
 
   constructor(id?: string, config?: SliceConfig) {
-    super(id);
+    super(id, config);
     const cfg = config ?? {} as SliceConfig;
     // Resolve axes config to axisMap
     this.axisMap      = resolveAxes(cfg.axes ?? ["x", "y"]);
     this.sliceAxis    = this.axisMap[2];
     this.mipThickness = cfg.mipThickness ?? 1;
-    this.selection    = cfg.selection ? { ...cfg.selection } : {};
     this.params       = new SliceLayerParams(cfg);
-    this.source       = cfg.source;
-    this.maxPoolSize  = cfg.maxPoolSize;
 
     // Store dataSize and auto-compute in-plane size + slice count
     this.dataSize = this.source?.pyramid?.levels[0]?.shape ?? [1, 1, 1];
@@ -234,22 +214,96 @@ export class SliceLayer extends BaseLayer {
 
     // Default sliceIndex to center of through-plane axis
     this.sliceIndex = cfg.sliceIndex ?? Math.floor(this.sliceCount / 2);
-
-    this.currentLevel = Math.max(0, (this.source?.pyramid?.levels.length ?? 1) - 1);
   }
 
-  /** Tile residency descriptor — view-side LayerRenderer allocates the pool. */
-  override getTileSpec(): TileSpec | null {
-    const pyramid = this.source?.pyramid;
-    if (!pyramid?.levels.length) return null;
+  // === TiledImageLayer hooks (2D planes) ===
+
+  protected get tileLabel(): string { return "SliceLayer"; }
+  protected get levelAxes(): readonly AxisIndex[] { return [this.axisMap[0], this.axisMap[1]]; }
+
+  protected slotSize(pyramid: ImagePyramid): Vec3 {
+    const [uAxis, vAxis] = this.axisMap;
+    return pyramid.levels.reduce<Vec3>((max, level) => [
+      Math.max(max[0], level.chunkSize[uAxis]),
+      Math.max(max[1], level.chunkSize[vAxis]),
+      1,
+    ], [1, 1, 1]);
+  }
+
+  protected levelGrid(ctx: TileLevelContext): TileLevelGrid {
+    const [uAxis, vAxis] = this.axisMap;
     return {
-      slotSize      : maxPlaneChunkSize(pyramid, this.axisMap),
-      initialLevel  : pyramid.levels.length - 1,
-      format        : "r16float",
-      bytesPerTexel : 2,
-      label         : `SliceLayer[${this.id}]`,
-      maxPoolSize   : this.maxPoolSize,
+      gridDim   : 2,
+      chunkSize : [ctx.levelInfo.chunkSize[uAxis], ctx.levelInfo.chunkSize[vAxis]],
+      resSize   : [ctx.levelInfo.shape[uAxis], ctx.levelInfo.shape[vAxis]],
     };
+  }
+
+  protected makeTile(
+    ctx      : TileLevelContext,
+    gridIdx  : number,
+    voxelPos : number[],
+    level    : number,
+    region   : { start: number[]; size: number[] },
+  ): TilePlacement {
+    const [uAxis, vAxis] = this.axisMap;
+    const sliceIdx = this.levelSliceIndex(ctx);
+    return {
+      gridIdx,
+      voxelPos,
+      level,
+      id        : `${level}:${sliceIdx},${voxelPos.join(",")}`,
+      chunkSize : [ctx.levelInfo.chunkSize[uAxis], ctx.levelInfo.chunkSize[vAxis], 1],
+      region    : {
+        start : [region.start[0], region.start[1], 0],
+        size  : [region.size[0], region.size[1], 1],
+      },
+    };
+  }
+
+  protected fetchPosition(ctx: TileLevelContext, voxelPos: number[]): number[] {
+    return this.getFetchPosition(voxelPos, this.levelSliceIndex(ctx));
+  }
+
+  protected syncGridParams(plan: TilePlan<TilePlacement>): void {
+    this.params.setViewport(
+      plan.viewportOrigin as [number, number],
+      plan.viewportSize as [number, number],
+    );
+    this.params.setTileGrid(
+      plan.gridOrigin.map((value, axis) => value * plan.tileNormSize[axis]) as [number, number],
+      plan.tileNormSize as [number, number],
+      plan.gridShape as [number, number],
+    );
+  }
+
+  /**
+   * Remap 2D tile position + slice index to 3D fetch position
+   * using the axis permutation. Plane-agnostic.
+   */
+  private getFetchPosition(pos: number[], sliceIndex: number): Vec3 {
+    const result: Vec3 = [0, 0, 0];
+    result[this.axisMap[0]] = pos[0];     // u → uAxis
+    result[this.axisMap[1]] = pos[1];     // v → vAxis
+    result[this.axisMap[2]] = sliceIndex; // slice → sliceAxis
+    return result;
+  }
+
+  /** Slice index remapped onto a pyramid level's through-plane size. */
+  private levelSliceIndex(ctx: TileLevelContext): number {
+    return mapSliceIndex(
+      this.sliceIndex,
+      ctx.pyramid.levels[0].shape[this.sliceAxis],
+      ctx.levelInfo.shape[this.sliceAxis],
+    );
+  }
+
+  // === BaseLayer interface ===
+
+  override getLevelResolution(level: number): number | undefined {
+    const scale = this.source?.pyramid?.levels[level]?.scale;
+    if (!scale) return undefined;
+    return Math.max(scale[this.axisMap[0]], scale[this.axisMap[1]]);
   }
 
   protected override applyTransformConfig(desc: LayerConfig, physical?: PhysicalSpace): void {
@@ -266,83 +320,6 @@ export class SliceLayer extends BaseLayer {
     });
   }
 
-  /** Plan every storage chunk intersecting this frame's visible slice bounds. */
-  override planTiles(
-    viewport: TileViewport,
-  ): TileFramePlan<SliceTile> | null {
-    const source  = this.source;
-    const pyramid = source?.pyramid;
-    if (!source || !pyramid?.levels.length) return null;
-
-    const [uAxis, vAxis, sliceAxis] = this.axisMap;
-    const level = viewport.forcedLevel ?? pickPyramidLevel(pyramid, {
-      worldUnitsPerPixel: viewport.selectionUnitsPerPixel ?? viewport.worldUnitsPerPixel,
-      axes              : [uAxis, vAxis],
-      currentLevel      : viewport.currentLevel,
-      bounds            : viewport.bounds,
-      tileBudget        : viewport.tileBudget,
-    });
-    this.currentLevel = level;
-    const levelInfo = pyramid.levels[level];
-    const resSize   = [levelInfo.shape[uAxis], levelInfo.shape[vAxis]];
-    const chunkSize = [levelInfo.chunkSize[uAxis], levelInfo.chunkSize[vAxis]];
-    const sliceIdx  = mapSliceIndex(
-      this.sliceIndex,
-      pyramid.levels[0].shape[sliceAxis],
-      levelInfo.shape[sliceAxis],
-    );
-    const plan = planTiles<SliceTile>({
-      bounds    : viewport.bounds,
-      chunkSize,
-      resSize,
-      gridDim  : 2,
-      level,
-      makeTile : (gridIdx, voxelPos, lvl, region) => ({
-        gridIdx,
-        voxelPos,
-        level : lvl,
-        id    : `${lvl}:${sliceIdx},${voxelPos.join(",")}`,
-        chunkSize: [chunkSize[0], chunkSize[1], 1],
-        region: {
-          start: [region.start[0], region.start[1], 0],
-          size : [region.size[0], region.size[1], 1],
-        },
-      }),
-    });
-
-    this.viewportOrigin = plan.viewportOrigin as [number, number];
-    this.viewportSize   = plan.viewportSize as [number, number];
-    this.params.setViewport(this.viewportOrigin, this.viewportSize);
-    this.params.setTileGrid(
-      plan.gridOrigin.map((value, axis) => value * plan.tileNormSize[axis]) as [number, number],
-      plan.tileNormSize as [number, number],
-      plan.gridShape as [number, number],
-    );
-
-    const selection = this.selection;
-    return {
-      plan,
-      loader: {
-        fetch: (req) => buildTileFetcher(source, selection)({
-          level    : req.level,
-          position : this.getFetchPosition(req.voxelPos, sliceIdx),
-        }),
-      },
-    };
-  }
-
-  /**
-   * Remap 2D tile position + slice index to 3D fetch position
-   * using the axis permutation. Plane-agnostic.
-   */
-  private getFetchPosition(pos: number[], sliceIndex: number): Vec3 {
-    const result: Vec3 = [0, 0, 0];
-    result[this.axisMap[0]] = pos[0];     // u → uAxis
-    result[this.axisMap[1]] = pos[1];     // v → vAxis
-    result[this.axisMap[2]] = sliceIndex; // slice → sliceAxis
-    return result;
-  }
-
   setSliceIndex(index: number): void {
     if (this.sliceIndex !== index) {
       this.sliceIndex = index;
@@ -350,22 +327,8 @@ export class SliceLayer extends BaseLayer {
     }
   }
 
-  override setSelection(key: string, value: number): void {
-    if (this.selection[key] !== value) {
-      this.selection[key] = value;
-      this.dataVersion++;
-    }
-  }
-
   override setContrast(min: number, max: number): void {
     this.params.setContrast(min, max);
-  }
-
-  /** Update the data source (e.g., when channel changes) */
-  override setSource(source: Data): void {
-    if (!sourceChanged(source, this.source)) return;
-    this.source = source;
-    this.dataVersion++;
   }
 
   getGeometry(): Geometry {
@@ -378,19 +341,9 @@ export class SliceLayer extends BaseLayer {
     };
   }
 
-  getParams(): LayerParams {
-    this.params.setOpacity(this.opacity);
+  protected getLayerParams(): LayerParams {
     return this.params;
   }
-}
-
-function maxPlaneChunkSize(pyramid: ImagePyramid, axisMap: AxisMap): Vec3 {
-  const [uAxis, vAxis] = axisMap;
-  return pyramid.levels.reduce<Vec3>((max, level) => [
-    Math.max(max[0], level.chunkSize[uAxis]),
-    Math.max(max[1], level.chunkSize[vAxis]),
-    1,
-  ], [1, 1, 1]);
 }
 
 function mapSliceIndex(index: number, finestSize: number, levelSize: number): number {

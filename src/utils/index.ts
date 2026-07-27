@@ -11,6 +11,14 @@ export {
   computeForward,
 } from "./spherical";
 
+// Fit-to-data camera helpers
+export {
+  frameVolumeCamera,
+  fitSliceCamera,
+  type FrameVolumeCameraOptions,
+  type FitSliceCameraOptions,
+} from "./camera-fit";
+
 // Shared axis helpers
 export {
   resolveAxes,
@@ -69,7 +77,19 @@ export {
   normalizeDrag,
 } from "./input";
 
-// Projection (physical ↔ screen)
+// Config option parsing (checked readers for untyped option bags)
+export {
+  optArray,
+  optAxis,
+  optBoolean,
+  optNumber,
+  optNumberRecord,
+  optString,
+  optVec2,
+  optVec3,
+} from "./options";
+
+// Projection (physical ↔ screen) + shared Vec3 math
 export {
   physicalToSliceScreen,
   screenToSlicePhysical,
@@ -77,25 +97,14 @@ export {
   screenToVolumeTargetPlane,
   sliceUnitsPerPixel,
   volumeUnitsPerPixel,
+  cameraBasis,
+  subtract,
+  cross,
+  dot,
+  normalize,
 } from "./projection";
 
-// Anatomical orientation (biomedical axis metadata)
-export {
-  parseAnatomicalOrientation,
-  buildSliceOrientations,
-  canonicalToStorageIndex,
-  type StorageAxis,
-  type StorageAxisName,
-  type AnatomicalAxis,
-  type AnatomicalDirection,
-  type OrientationSign,
-  type SlicePlane,
-  type OrientedSlicePlane,
-  type OrientedAxis,
-  type AnatomicalOrientation,
-} from "./anatomical-orientation";
-
-// Channel colors and contrast limits (biomedical)
+// Channel colors and contrast limits
 export {
   CHANNEL_FALLBACK_COLORS,
   CONTRAST_RANGE,

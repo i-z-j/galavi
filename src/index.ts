@@ -17,6 +17,7 @@ export type {
   GalaviConfig,
   State,
   ViewConfig,
+  ControlOptions,
   PhysicalSpace,
   LayerConfig,
   Exploration,
@@ -64,11 +65,47 @@ export {
   type OverlayCornerPosition,
   type OverlayLabelVariant,
 } from "./overlay";
-export { BaseLayer } from "./layer";
+export {
+  BaseLayer,
+  MIN_VEC4_BUFFER,
+  type Geometry,
+  type Shader,
+  type LayerParams,
+  type LayerClass,
+} from "./layer";
+export {
+  TiledImageLayer,
+  type TileLevelContext,
+  type TileLevelGrid,
+  type TiledImageOptions,
+} from "./layer";
+
+// === Per-layer option bags + typed LayerConfig aliases ===
+export type {
+  VolumeOptions,
+  VolumeLayerConfig,
+  SliceOptions,
+  SliceLayerConfig,
+  SurfaceOptions,
+  SurfaceLayerConfig,
+  ShapesOptions,
+  ShapesLayerConfig,
+  PointsOptions,
+  PointsLayerConfig,
+  SegmentationOptions,
+  SegmentationLayerConfig,
+  VectorsOptions,
+  VectorsLayerConfig,
+  TracksOptions,
+  TracksLayerConfig,
+  NetworkOptions,
+  NetworkLayerConfig,
+} from "./layer";
 export { BaseView } from "./view";
 
 // === Theme ===
 export {
+  DEFAULT_THEME,
   FUI_THEME,
   PRECISION_THEME,
   resolveTheme,
@@ -84,7 +121,8 @@ export {
 // or source adapters. Grouped by category:
 //
 //   - Camera math       — clampPitch, cameraDistance, cameraAngles,
-//                         computePosition, computeForward
+//                         computePosition, computeForward,
+//                         frameVolumeCamera, fitSliceCamera
 //   - Axes              — resolveAxes, AxisIndex, AxisMap
 //   - Geometry          — EMPTY_VERTEX_BUFFER, UNIT_CUBE, aabbFromPositions
 //   - Colormaps         — getColormapLUT, COLORMAP_NAMES, ColormapName,
@@ -98,5 +136,9 @@ export {
 //                         TileBounds, TileViewport,
 //                         floatToFloat16
 //   - Input             — normalizeWheel, normalizeDrag
+//   - Vectors           — cameraBasis, subtract, cross, dot, normalize
 //
 export * from "./utils";
+
+// === Defaults (stable semantic constants) ===
+export { DEFAULT_FOV } from "./defaults";

@@ -11,8 +11,7 @@
 import type { State, Vec3 } from "../types";
 import { physicalToSliceScreen, physicalToVolumeScreen, type AxisMap } from "../utils";
 import { BaseOverlay } from "./base";
-
-const SVG_NS = "http://www.w3.org/2000/svg";
+import { SVG_NS, createFullscreenSvg, physicalBounds } from "./utils";
 
 // ============================================================================
 // CROSSHAIR OVERLAY
@@ -38,11 +37,7 @@ export class CrosshairOverlay extends BaseOverlay {
   }
 
   protected override onMount(root: HTMLDivElement, _parent: HTMLElement): void {
-    const svg = document.createElementNS(SVG_NS, "svg");
-    svg.style.position      = "absolute";
-    svg.style.inset         = "0";
-    svg.style.width         = "100%";
-    svg.style.height        = "100%";
+    const svg = createFullscreenSvg();
     svg.style.pointerEvents = "none";
     root.appendChild(svg);
 
@@ -120,11 +115,7 @@ export class CrosshairOverlay extends BaseOverlay {
 
     const camera = state.exploration.camera;
     const target = camera.target;
-    const origin = (state.physical?.spatial?.origin ?? [0, 0, 0]) as Vec3;
-    const size   = (state.physical?.spatial?.size   ?? [1, 1, 1]) as Vec3;
-
-    const min: Vec3 = [origin[0], origin[1], origin[2]];
-    const max: Vec3 = [origin[0] + size[0], origin[1] + size[1], origin[2] + size[2]];
+    const { min, max } = physicalBounds(state);
 
     this.setAxisLine(this.axisX, [min[0], target[1], target[2]], [max[0], target[1], target[2]], camera, width, height);
     this.setAxisLine(this.axisY, [target[0], min[1], target[2]], [target[0], max[1], target[2]], camera, width, height);

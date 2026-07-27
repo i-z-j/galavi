@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 import type { Camera, State } from "../src/types";
 import type { AxisMap } from "../src/utils/axes";
 import {

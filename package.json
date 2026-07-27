@@ -1,6 +1,6 @@
 {
   "name": "galavi",
-  "version": "2026.4.30",
+  "version": "2026.8.1",
   "description": "Scientific data visualization library based on WebGPU",
   "keywords": ["webgpu", "visualization", "ome-zarr", "scientific", "3d", "microscopy"],
   "author": "Zi-Jian Yi (伊子健) <arrowzeke@gmail.com>",
@@ -14,8 +14,6 @@
     "url": "git+https://github.com/i-z-j/galavi.git"
   },
   "type": "module",
-  "main": "dist/galavi.js",
-  "module": "dist/galavi.js",
   "types": "dist/index.d.ts",
   "exports": {
     ".": {
@@ -30,8 +28,10 @@
   "sideEffects": false,
   "scripts": {
     "build": "vite build",
-    "typecheck": "tsc --noEmit",
-    "prepublishOnly": "bun run build"
+    "test": "vitest run",
+    "test:pack": "node scripts/check-pack.mjs",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
+    "prepublishOnly": "bun run typecheck && bun run test && bun run build"
   },
   "dependencies": {
     "wgpu-matrix": "^3.4.0"
@@ -39,8 +39,10 @@
   "devDependencies": {
     "@webgpu/types": "^0.1.65",
     "bun-types": "^1.2.22",
+    "jsdom": "^29.1.1",
     "typescript": "^5.5.3",
     "vite": "^5.4.1",
-    "vite-plugin-dts": "^4.5.0"
+    "vite-plugin-dts": "^4.5.0",
+    "vitest": "^4.1.10"
   }
 }

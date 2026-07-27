@@ -1,10 +1,9 @@
 /**
  * RulerOverlay — draggable two-endpoint measurement line.
  *
- * Port of the cerevi-web `RulerOverlay.vue` component to the BaseOverlay
- * architecture: an SVG line with draggable bar handles at both endpoints,
- * a thick invisible hit-target for whole-line drags, and a distance label at
- * the line midpoint. `unitsPerPixel` is derived from the live galavi `State`
+ * An SVG line with draggable bar handles at both endpoints, a thick
+ * invisible hit-target for whole-line drags, and a distance label at the
+ * line midpoint. `unitsPerPixel` is derived from the live galavi `State`
  * each frame (slice views → orthographic scale, volume views → perspective
  * scale at the target plane) instead of arriving as a prop.
  */
@@ -12,8 +11,7 @@
 import type { State } from "../types";
 import { sliceUnitsPerPixel, volumeUnitsPerPixel } from "../utils";
 import { BaseOverlay } from "./base";
-
-const SVG_NS = "http://www.w3.org/2000/svg";
+import { SVG_NS, createFullscreenSvg } from "./utils";
 
 type DragTarget = "start" | "end" | "line";
 
@@ -73,11 +71,7 @@ export class RulerOverlay extends BaseOverlay {
   }
 
   protected override onMount(root: HTMLDivElement): void {
-    const svg = document.createElementNS(SVG_NS, "svg");
-    svg.style.position = "absolute";
-    svg.style.inset    = "0";
-    svg.style.width    = "100%";
-    svg.style.height   = "100%";
+    const svg = createFullscreenSvg();
 
     // Whole-line hit target — thicker than the visible line.
     const hitLine = document.createElementNS(SVG_NS, "line");
@@ -194,7 +188,7 @@ export class RulerOverlay extends BaseOverlay {
     this.positionCap(this.startEl, this.start, capOffsetX, capOffsetY);
     this.positionCap(this.endEl, this.end, capOffsetX, capOffsetY);
 
-    const unit           = this.opts.unit ?? state.physical?.spatial?.unit ?? "µm";
+    const unit           = this.opts.unit ?? state.physical?.spatial?.unit;
     const unitsPerPixel  = this.computeUnitsPerPixel(state);
     this.labelEl.textContent = this.formatDistance(unitsPerPixel, unit);
     this.labelEl.style.left  = `${(this.start.x + this.end.x) / 2}px`;
@@ -247,13 +241,13 @@ export class RulerOverlay extends BaseOverlay {
     return undefined;
   }
 
-  /** Cerevi `distanceLabel` formatting, including µm→mm promotion at ≥1000. */
-  private formatDistance(unitsPerPixel: number | undefined, unit: string): string {
+  /** Unit-agnostic distance formatting — the state's unit label, verbatim. */
+  private formatDistance(unitsPerPixel: number | undefined, unit: string | undefined): string {
     if (unitsPerPixel === undefined) return "-";
     const distance = Math.hypot(this.end.x - this.start.x, this.end.y - this.start.y) * unitsPerPixel;
     if (!Number.isFinite(distance) || distance <= 0) return "-";
-    if (["μm", "µm", "um"].includes(unit) && distance >= 1000) return `${(distance / 1000).toFixed(2)} mm`;
-    return `${distance.toFixed(distance >= 100 ? 0 : distance >= 1 ? 1 : 2)} ${unit || "μm"}`;
+    const value = distance.toFixed(distance >= 100 ? 0 : distance >= 1 ? 1 : 2);
+    return unit ? `${value} ${unit}` : value;
   }
 
   private applyStyles(): void {
@@ -265,5 +259,3 @@ export class RulerOverlay extends BaseOverlay {
     if (this.endEl) this.endEl.style.strokeWidth = capWidth;
   }
 }
-
-export default RulerOverlay;

@@ -12,7 +12,8 @@ import {
   clampPitch,
   computePosition,
   cameraDistance,
-  cameraAngles
+  cameraAngles,
+  optNumber
 } from "../utils";
 import {
   ZOOM_SENSITIVITY,
@@ -28,8 +29,8 @@ export interface OrbitControlOptions {
 
 export class OrbitControl extends BaseControl {
   static readonly controlType = "orbit";
-  static create(id: string, options?: Record<string, unknown>): OrbitControl {
-    return new OrbitControl(id, options as OrbitControlOptions | undefined);
+  static create(id: string, options?: OrbitControlOptions): OrbitControl {
+    return new OrbitControl(id, options);
   }
 
   override readonly navMode = "orbit" as const;
@@ -38,8 +39,8 @@ export class OrbitControl extends BaseControl {
 
   constructor(id: string, options?: OrbitControlOptions) {
     super(id);
-    this.zoomSensitivity  = options?.zoomSensitivity ?? ZOOM_SENSITIVITY;
-    this.orbitSensitivity = options?.orbitSensitivity ?? ORBIT_SENSITIVITY;
+    this.zoomSensitivity  = optNumber(options?.zoomSensitivity)  ?? ZOOM_SENSITIVITY;
+    this.orbitSensitivity = optNumber(options?.orbitSensitivity) ?? ORBIT_SENSITIVITY;
   }
 
   handle(action: Action, state: State): State {

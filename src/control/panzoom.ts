@@ -8,7 +8,7 @@
  */
 
 import type { State, Action, Vec3 } from "../types";
-import { cameraDistance, type AxisMap } from "../utils";
+import { cameraDistance, optNumber, type AxisMap } from "../utils";
 import {
   ZOOM_SENSITIVITY,
 } from "../defaults";
@@ -20,15 +20,15 @@ export interface PanZoomControlOptions {
 
 export class PanZoomControl extends BaseControl {
   static readonly controlType = "panzoom";
-  static create(id: string, options?: Record<string, unknown>): PanZoomControl {
-    return new PanZoomControl(id, options as PanZoomControlOptions | undefined);
+  static create(id: string, options?: PanZoomControlOptions): PanZoomControl {
+    return new PanZoomControl(id, options);
   }
 
   private readonly zoomSensitivity: number;
 
   constructor(id: string, options?: PanZoomControlOptions) {
     super(id);
-    this.zoomSensitivity = options?.zoomSensitivity ?? ZOOM_SENSITIVITY;
+    this.zoomSensitivity = optNumber(options?.zoomSensitivity) ?? ZOOM_SENSITIVITY;
   }
 
   handle(action: Action, state: State): State {
