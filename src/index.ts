@@ -25,10 +25,12 @@ export type {
   TemporalConfig,
   ChannelConfig,
   Data,
+  SourceDescriptor,
   ImagePyramid,
   ImagePyramidLevel,
   ViewResolution,
   Render,
+  VolumeRenderMode,
   Camera,
   Temporal,
   Action,
@@ -46,6 +48,11 @@ export {
   registerOverlay,
   registerLayer,
   registerView,
+  registerSource,
+} from "./registry";
+export type {
+  ResolvedSource,
+  SourceFactory,
 } from "./registry";
 
 export { BaseControl } from "./control";
@@ -134,7 +141,7 @@ export {
 //                         sourceChanged, resolveDataUrl,
 //                         countPyramidLevelTiles, pickPyramidLevel,
 //                         TileBounds, TileViewport,
-//                         floatToFloat16
+//                         floatToFloat16, dtypeNormalization, makeFloat16Encoder
 //   - Input             — normalizeWheel, normalizeDrag
 //   - Vectors           — cameraBasis, subtract, cross, dot, normalize
 //

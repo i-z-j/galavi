@@ -172,11 +172,11 @@ export class SliceLayer extends TiledImageLayer {
   /** Axis permutation: [uAxis, vAxis, sliceAxis] */
   readonly axisMap      : AxisMap;
   /** Volume dimensions [x, y, z] in voxels at full resolution */
-  readonly dataSize     : Vec3;
+  dataSize!             : Vec3;
   /** In-plane size [u, v] + slice count along through-plane axis */
-  readonly size         : Vec3;
+  size!                 : Vec3;
   /** Number of slices along the through-plane axis */
-  readonly sliceCount   : number;
+  sliceCount!           : number;
   /** Index of the slice axis (0=x, 1=y, 2=z) */
   readonly sliceAxis    : number;
   /** MIP thickness along the slice axis */
@@ -203,7 +203,19 @@ export class SliceLayer extends TiledImageLayer {
     this.params       = new SliceLayerParams(cfg);
 
     // Store dataSize and auto-compute in-plane size + slice count
-    this.dataSize = this.source?.pyramid?.levels[0]?.shape ?? [1, 1, 1];
+    this.derivePlaneSizes();
+
+    // Default sliceIndex to center of through-plane axis
+    this.sliceIndex = cfg.sliceIndex ?? Math.floor(this.sliceCount / 2);
+  }
+
+  /**
+   * Derive dataSize / in-plane size / slice count from the effective pyramid.
+   * Re-run when a declarative source descriptor resolves — until then the
+   * pyramid is unknown and these hold the [1,1,1] placeholder.
+   */
+  private derivePlaneSizes(): void {
+    this.dataSize = this.effectiveSource?.pyramid?.levels[0]?.shape ?? [1, 1, 1];
     const [u, v, s] = this.axisMap;
     this.size = [
       this.dataSize[u],
@@ -211,9 +223,12 @@ export class SliceLayer extends TiledImageLayer {
       Math.ceil(this.dataSize[s] / this.mipThickness),
     ];
     this.sliceCount = this.size[2];
+  }
 
-    // Default sliceIndex to center of through-plane axis
-    this.sliceIndex = cfg.sliceIndex ?? Math.floor(this.sliceCount / 2);
+  protected override onSourceResolved(): void {
+    this.derivePlaneSizes();
+    // Keep the current slice inside the newly resolved plane range.
+    this.sliceIndex = Math.max(0, Math.min(this.sliceIndex, this.sliceCount - 1));
   }
 
   // === TiledImageLayer hooks (2D planes) ===
@@ -301,7 +316,7 @@ export class SliceLayer extends TiledImageLayer {
   // === BaseLayer interface ===
 
   override getLevelResolution(level: number): number | undefined {
-    const scale = this.source?.pyramid?.levels[level]?.scale;
+    const scale = this.effectiveSource?.pyramid?.levels[level]?.scale;
     if (!scale) return undefined;
     return Math.max(scale[this.axisMap[0]], scale[this.axisMap[1]]);
   }

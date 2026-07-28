@@ -32,6 +32,7 @@ export {
 // Concrete layer classes — consumed by registry.ts and views.
 // Layer-internal helper types stay private to each layer subfolder.
 export { VolumeLayer,       type VolumeConfig       } from "./volume/main";
+export { optVolumeMode, VolumeLayerParams           } from "./volume/main";
 export { SliceLayer,        type SliceConfig        } from "./slice/main";
 export { SurfaceLayer,      type SurfaceConfig      } from "./surface/main";
 export { ShapesLayer,       type ShapesConfig       } from "./shape/main";

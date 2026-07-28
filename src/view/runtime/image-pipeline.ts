@@ -261,7 +261,10 @@ export class ImagePipeline {
   draw(pass: GPURenderPassEncoder, layers: readonly BaseLayer[]): void {
     const { device, rewriteNonTiledVerts } = this.opts;
     for (const layer of sortedByBlending(layers)) {
-      if (!layer.visible) continue;
+      // Not-ready layers (e.g. a tiled layer whose source descriptor is still
+      // resolving) are skipped: their renderer predates the resolved tile
+      // spec, so drawing would emit invalid bind/draw calls.
+      if (!layer.visible || !layer.isReady) continue;
       const ds = this.states.get(layer.id);
       if (!ds) continue;
       pass.setPipeline(ds.pipeline);

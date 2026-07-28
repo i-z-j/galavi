@@ -10,6 +10,7 @@
  *   - planner.ts  — planTiles, TilePlacement, TilePlan
  *   - manager.ts  — TileManager, TileLoader, TileFramePlan
  *   - float16.ts  — floatToFloat16
+ *   - pack.ts     — dtypeNormalization, makeFloat16Encoder
  */
 
 export {
@@ -51,3 +52,8 @@ export {
 } from "./manager";
 
 export { floatToFloat16 } from "./float16";
+
+export {
+  dtypeNormalization,
+  makeFloat16Encoder,
+} from "./pack";

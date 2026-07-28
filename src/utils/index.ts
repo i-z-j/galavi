@@ -52,6 +52,8 @@ export {
   tileId,
   buildTileFetcher,
   floatToFloat16,
+  dtypeNormalization,
+  makeFloat16Encoder,
   sourceChanged,
   resolveDataUrl,
   pickPyramidLevel,

@@ -4,7 +4,12 @@
  */
 import { afterEach, describe, expect, test } from "vitest";
 import { PointsLayer } from "../src/layer";
-import { layerRegistry, registerLayer } from "../src/registry";
+import {
+  layerRegistry,
+  registerLayer,
+  registerSource,
+  sourceRegistry,
+} from "../src/registry";
 
 describe("layerRegistry", () => {
   afterEach(() => {
@@ -33,5 +38,34 @@ describe("layerRegistry", () => {
 
     expect(layerRegistry.unregister("custom-points")).toBe(true);
     expect(layerRegistry.has("custom-points")).toBe(false);
+  });
+});
+
+describe("sourceRegistry", () => {
+  afterEach(() => {
+    sourceRegistry.unregister("custom-source");
+  });
+
+  test("registers and creates a source factory, resolves its promise", async () => {
+    expect(sourceRegistry.has("custom-source")).toBe(false);
+    registerSource("custom-source", async (desc) => ({
+      selection: { c: Number(desc.channel ?? 0) },
+    }));
+    expect(sourceRegistry.has("custom-source")).toBe(true);
+    expect(sourceRegistry.keys()).toContain("custom-source");
+
+    const resolved = await sourceRegistry.create("custom-source", {
+      type    : "custom-source",
+      channel : 2,
+    });
+    expect(resolved).toEqual({ selection: { c: 2 } });
+
+    expect(sourceRegistry.unregister("custom-source")).toBe(true);
+    expect(sourceRegistry.has("custom-source")).toBe(false);
+  });
+
+  test("throws `Unknown type` for an unregistered type", () => {
+    expect(() => sourceRegistry.create("nope", { type: "nope" }))
+      .toThrow('Unknown type: "nope"');
   });
 });

@@ -3,7 +3,8 @@
  * (VolumeLayer: 3D chunks, SliceLayer: 2D planes).
  *
  * Owns everything the two layers do identically: source/selection state and
- * versioning, the tile-residency spec, and the per-frame plan flow
+ * versioning, declarative source-descriptor resolution (`Data.source` via
+ * `sourceRegistry`), the tile-residency spec, and the per-frame plan flow
  * (level pick → chunk enumeration → params sync → loader). The genuine
  * dimensional differences stay in the concrete layer as small hooks:
  * level-selection axes, slot-size computation, level-grid projection,
@@ -14,6 +15,7 @@ import type {
   Data,
   ImagePyramid,
   ImagePyramidLevel,
+  SourceDescriptor,
   Vec3,
 } from "../types";
 import {
@@ -28,6 +30,10 @@ import {
   type TileSpec,
   type TileViewport,
 } from "../utils";
+import {
+  sourceRegistry,
+  type ResolvedSource,
+} from "../registry";
 import { BaseLayer } from "./base";
 
 /** Options shared by every tiled image layer. */
@@ -59,6 +65,15 @@ export abstract class TiledImageLayer extends BaseLayer {
   protected maxPoolSize? : number;
   protected selection    : Record<string, number>;
 
+  /**
+   * Runtime artifacts resolved from `source.source` via `sourceRegistry`.
+   * Never written back into `State` — the descriptor stays the canonical,
+   * JSON-serializable form of the source.
+   */
+  private resolvedSource? : ResolvedSource;
+  /** Monotonic token invalidating superseded async resolutions. */
+  private sourceEpoch     = 0;
+
   private currentLevel : number;
 
   constructor(id?: string, config?: TiledImageOptions) {
@@ -67,6 +82,7 @@ export abstract class TiledImageLayer extends BaseLayer {
     this.maxPoolSize  = config?.maxPoolSize;
     this.selection    = config?.selection ? { ...config.selection } : {};
     this.currentLevel = Math.max(0, (this.source?.pyramid?.levels.length ?? 1) - 1);
+    this.resolveSourceDescriptor();
   }
 
   // === Dimensional hooks (the real 2D/3D differences) ===
@@ -111,11 +127,106 @@ export abstract class TiledImageLayer extends BaseLayer {
     if (!sourceChanged(source, this.source)) return;
     this.source = source;
     this.dataVersion++;
+    this.resolveSourceDescriptor();
   }
+
+  // === Declarative source descriptors (Data.source) ===
+
+  /**
+   * The config source overlaid with descriptor-resolved runtime artifacts.
+   * Explicit `pyramid`/`fetch` in the config always win over resolved ones.
+   */
+  protected get effectiveSource(): Data | undefined {
+    const source   = this.source;
+    const resolved = this.resolvedSource;
+    if (!source || !resolved) return source;
+    return {
+      ...source,
+      pyramid : source.pyramid ?? resolved.pyramid,
+      fetch   : source.fetch   ?? resolved.fetch,
+    };
+  }
+
+  /** Runtime artifacts produced by the last successful descriptor resolution. */
+  getResolvedSource(): ResolvedSource | undefined {
+    return this.resolvedSource;
+  }
+
+  /**
+   * Ready unless a declarative source descriptor still needs resolution.
+   * Sources with an explicit `pyramid`/`fetch` (and sources without a
+   * descriptor) are always ready, matching the pre-descriptor behavior.
+   */
+  override get isReady(): boolean {
+    const source = this.source;
+    if (!source?.source || source.pyramid || source.fetch) return true;
+    return this.resolvedSource !== undefined;
+  }
+
+  /**
+   * Kick off asynchronous resolution of `source.source` (if any) through
+   * `sourceRegistry`. Explicit `pyramid`/`fetch` take precedence — the
+   * descriptor is ignored while either is present.
+   *
+   * Failure semantics: the error is logged via `console.error` with the
+   * descriptor and the layer stays not-ready; the Galavi instance and other
+   * layers are unaffected.
+   */
+  private resolveSourceDescriptor(): void {
+    this.sourceEpoch++;
+    this.resolvedSource = undefined;
+
+    const source = this.source;
+    const desc   = source?.source;
+    if (!desc || source?.pyramid || source?.fetch) return;
+
+    const epoch = this.sourceEpoch;
+    let pending: Promise<ResolvedSource>;
+    try {
+      pending = sourceRegistry.create(desc.type, desc);
+    } catch (err) {
+      // Unknown source type — `create` throws synchronously.
+      this.logSourceError(err, desc);
+      return;
+    }
+
+    pending.then((resolved) => {
+      if (epoch !== this.sourceEpoch) return; // superseded by a newer source
+      this.resolvedSource = resolved;
+      if (resolved.selection) {
+        for (const [key, value] of Object.entries(resolved.selection)) {
+          if (this.selection[key] === undefined) this.selection[key] = value;
+        }
+      }
+      this.onSourceResolved(resolved);
+      this.dataVersion++;
+      // A renderer built before resolution has no tile residency; bump the
+      // geometry version so the view rebuilds it against the resolved pyramid.
+      this.geometryVersion++;
+      this.requestRender();
+    }).catch((err) => {
+      if (epoch !== this.sourceEpoch) return;
+      this.logSourceError(err, desc);
+    });
+  }
+
+  private logSourceError(err: unknown, desc: SourceDescriptor): void {
+    console.error(
+      `[${this.tileLabel}] Failed to resolve source for layer "${this.id}" — layer stays not-ready:`,
+      err,
+      desc,
+    );
+  }
+
+  /**
+   * Hook invoked after a source descriptor resolves. Subclasses may re-derive
+   * pyramid-dependent state here (e.g. SliceLayer's plane sizes).
+   */
+  protected onSourceResolved(_resolved: ResolvedSource): void {}
 
   /** Tile residency descriptor — view-side LayerRenderer allocates the pool. */
   override getTileSpec(): TileSpec | null {
-    const pyramid = this.source?.pyramid;
+    const pyramid = this.effectiveSource?.pyramid;
     if (!pyramid?.levels.length) return null;
     return {
       slotSize      : this.slotSize(pyramid),
@@ -133,7 +244,7 @@ export abstract class TiledImageLayer extends BaseLayer {
    * calls select automatically from physical scale and canvas size.
    */
   override planTiles(viewport: TileViewport): TileFramePlan | null {
-    const source  = this.source;
+    const source  = this.effectiveSource;
     const pyramid = source?.pyramid;
     if (!source || !pyramid?.levels.length) return null;
 

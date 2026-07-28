@@ -14,11 +14,13 @@ import type {
   ImagePyramid,
   LayerConfig,
   Vec3,
+  VolumeRenderMode,
 } from "../../types";
 import {
   UNIT_CUBE,
   optNumber,
   optNumberRecord,
+  optString,
   optVec2,
   type AxisIndex,
   type TilePlacement,
@@ -40,6 +42,11 @@ import shaderCode from "./shader.wgsl?raw";
 
 // === Volume Parameters ===
 
+/**
+ * Volume layer config. The ray-march accumulation mode is a render option,
+ * not an option-bag key: set it via `render.mode`
+ * (`"mip" | "minip" | "mean"`, default `"mip"`).
+ */
 export interface VolumeConfig extends TiledImageOptions {
   /** Contrast range [min, max] */
   contrastRange? : [number, number];
@@ -51,9 +58,31 @@ export type VolumeOptions = Omit<VolumeConfig, "source">;
 /** `LayerConfig` with the volume layer's typed options bag. */
 export type VolumeLayerConfig = LayerConfig<VolumeOptions>;
 
+/** Numeric mode codes packed into the params uniform (must match shader.wgsl). */
+const VOLUME_MODE_CODES: Record<VolumeRenderMode, number> = {
+  mip   : 0,
+  minip : 1,
+  mean  : 2,
+};
+
+const VOLUME_MODES = Object.keys(VOLUME_MODE_CODES) as VolumeRenderMode[];
+
+/**
+ * Checked reader for `render.mode`, following the config-boundary policy: a
+ * missing, wrong-typed, or unknown value reads as `undefined` so the caller
+ * falls back to the default (`"mip"`).
+ */
+export function optVolumeMode(value: unknown): VolumeRenderMode | undefined {
+  const str = optString(value);
+  return VOLUME_MODES.includes(str as VolumeRenderMode)
+    ? (str as VolumeRenderMode)
+    : undefined;
+}
+
 export class VolumeLayerParams implements LayerParams {
   private contrast       : [number, number] = [0, 1];
   private opacity                           = 1;
+  private mode           : VolumeRenderMode = "mip";
   private viewportOrigin : Vec3 = [0, 0, 0];
   private viewportSize   : Vec3 = [1, 1, 1];
   private cameraPosition : Vec3 = [0, 0, 0];
@@ -71,6 +100,10 @@ export class VolumeLayerParams implements LayerParams {
 
   setOpacity(opacity: number): void {
     this.opacity = opacity;
+  }
+
+  setMode(mode: VolumeRenderMode): void {
+    this.mode = mode;
   }
 
   setViewport(origin: Vec3, size: Vec3): void {
@@ -91,7 +124,7 @@ export class VolumeLayerParams implements LayerParams {
   // Layout: contrast(2), step(1), opacity(1), viewport_origin(3), _pad,
   // viewport_size(3), _pad, viewport_inv_size(3), _pad,
   // ray_origin_view(3), _pad, grid_origin(3), _pad,
-  // tile_norm_size(3), _pad, grid_shape(3), _pad = 32 floats
+  // tile_norm_size(3), _pad, grid_shape(3), mode(1) = 32 floats
   private readonly _buffer = new Float32Array(32);
   toBuffer(): Float32Array {
     const range     = this.contrast[1] - this.contrast[0];
@@ -112,7 +145,7 @@ export class VolumeLayerParams implements LayerParams {
     b[19] = 0;
     b[20] = this.gridOrigin[0];   b[21] = this.gridOrigin[1];   b[22] = this.gridOrigin[2];   b[23] = 0;
     b[24] = this.tileNormSize[0]; b[25] = this.tileNormSize[1]; b[26] = this.tileNormSize[2]; b[27] = 0;
-    b[28] = this.gridShape[0];    b[29] = this.gridShape[1];    b[30] = this.gridShape[2];    b[31] = 0;
+    b[28] = this.gridShape[0];    b[29] = this.gridShape[1];    b[30] = this.gridShape[2];    b[31] = VOLUME_MODE_CODES[this.mode];
     return b;
   }
 }
@@ -196,12 +229,22 @@ export class VolumeLayer extends TiledImageLayer {
   // === BaseLayer interface ===
 
   override getLevelResolution(level: number): number | undefined {
-    const scale = this.source?.pyramid?.levels[level]?.scale;
+    const scale = this.effectiveSource?.pyramid?.levels[level]?.scale;
     return scale ? Math.max(scale[0], scale[1], scale[2]) : undefined;
   }
 
   override setContrast(min: number, max: number): void {
     this.params.setContrast(min, max);
+  }
+
+  /** Set the ray-march accumulation mode (`"mip" | "minip" | "mean"`). */
+  setMode(mode: VolumeRenderMode): void {
+    this.params.setMode(mode);
+  }
+
+  protected override applyRenderConfig(desc: LayerConfig): void {
+    super.applyRenderConfig(desc);
+    this.setMode(optVolumeMode(desc.render?.mode) ?? "mip");
   }
 
   getGeometry(): Geometry {

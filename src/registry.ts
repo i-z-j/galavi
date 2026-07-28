@@ -5,7 +5,13 @@
  * signature so `create()` is type-safe via `Parameters<F>`.
  */
 
-import type { LayerConfig } from "./types";
+import type {
+  Data,
+  ImagePyramid,
+  LayerConfig,
+  PhysicalSpace,
+  SourceDescriptor,
+} from "./types";
 import {
   BaseLayer,
   VolumeLayer,
@@ -120,6 +126,24 @@ type ControlFactory = (id: string, options?: Record<string, unknown>) => BaseCon
 type OverlayFactory = () => BaseOverlay;
 type ViewFactory    = (id: string) => BaseView;
 
+/**
+ * ResolvedSource — runtime artifacts produced by resolving a
+ * {@link SourceDescriptor}. Consumed by tiled image layers: `pyramid` and
+ * `fetch` plug into the same pipeline as their explicit `Data` counterparts.
+ * All fields are optional so factories can return partial results (e.g. a
+ * `physical` hint only), though a tiled layer needs at least `pyramid` to
+ * render.
+ */
+export interface ResolvedSource {
+  pyramid?  : ImagePyramid;
+  fetch?    : NonNullable<Data["fetch"]>;   // matches Data["fetch"]
+  selection?: Record<string, number>;
+  physical? : PhysicalSpace;                // optional hint for apps (e.g. adapter-derived)
+}
+
+/** SourceFactory — resolves a declarative descriptor into runtime artifacts. */
+export type SourceFactory = (desc: SourceDescriptor) => Promise<ResolvedSource>;
+
 // NOTE: getters (not top-level `const` arrays) so the class identifiers are
 // resolved lazily, after every sibling module has finished initializing.
 // `view/runtime/factory.ts` imports from this module, so eager evaluation here
@@ -150,6 +174,7 @@ export const overlayRegistry = new Registry<BaseOverlay, OverlayFactory>(() =>
 export const viewRegistry    = new Registry<BaseView, ViewFactory>(() =>
   fromClasses<ViewFactory>(getViewClasses(), "viewType", (cls) => (id) => new cls(id)),
 );
+export const sourceRegistry  = new Registry<Promise<ResolvedSource>, SourceFactory>(() => ({}));
 
 // ============================================================================
 // CUSTOM REGISTRATION HELPERS (for advanced 3rd-party developers)
@@ -173,4 +198,14 @@ export function registerOverlay(type: string, factory: OverlayFactory): void {
 /** Register a custom view type */
 export function registerView(type: string, factory: ViewFactory): void {
   viewRegistry.register(type, factory);
+}
+
+/**
+ * Register a source type — the factory that turns a declarative
+ * {@link SourceDescriptor} (`Data.source`) into runtime artifacts.
+ * Tiled image layers resolve descriptors asynchronously through this
+ * registry; the resolved values never enter `State`.
+ */
+export function registerSource(type: string, factory: SourceFactory): void {
+  sourceRegistry.register(type, factory);
 }

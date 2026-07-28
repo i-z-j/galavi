@@ -5,7 +5,8 @@
 // Visible storage chunks are indexed through a dynamic per-frame grid.
 //
 // Strategy:
-// - Ray marching scoped to [0,1]³, MIP accumulation
+// - Ray marching scoped to [0,1]³, mode-dependent accumulation
+//   (mip / minip / mean, selected by params.mode)
 //
 // Bind Group Layout:
 //   @group(0) - Common (Camera + Params + Texture + Sampler)
@@ -37,7 +38,7 @@ struct Params {
   tile_norm_size     : vec3f,  // Nominal storage-chunk size in normalized data space
   _pad6              : f32,
   grid_shape         : vec3f,  // Visible chunk count per axis
-  _pad7              : f32,
+  mode               : f32,    // Ray-march accumulation: 0=mip, 1=minip, 2=mean
 };
 
 // === Tile Region ===
@@ -73,6 +74,11 @@ struct TileRegion {
 // === Constants ===
 const MAX_STEPS : i32 = 256;
 const MIP_EARLY_EXIT : f32 = 0.95;
+
+// Ray-march accumulation modes (must match VOLUME_MODE_CODES in main.ts)
+const MODE_MIP   : f32 = 0.0;
+const MODE_MINIP : f32 = 1.0;
+const MODE_MEAN  : f32 = 2.0;
 
 // === Vertex I/O ===
 struct VertexIn {
@@ -154,7 +160,7 @@ fn hash12(p: vec2f) -> f32 {
 }
 
 // ============================================================================
-// Fragment Shader - Raycast MIP through viewport region
+// Fragment Shader - Raycast through viewport region (mip / minip / mean)
 // ============================================================================
 
 @fragment
@@ -182,10 +188,17 @@ fn fs_main(input: VertexOut) -> @location(0) vec4f {
   // Step size is precomputed per-frame for the current viewport
   let step = params.step_size;
 
-  // MIP ray marching
+  // Ray marching with mode-dependent accumulation:
+  //   mip   — max of samples   (acc)
+  //   minip — min of samples   (acc)
+  //   mean  — average          (sum / count)
+  let is_mip   = params.mode < 0.5;
+  let is_mean  = params.mode > 1.5;
   let jitter = (hash12(input.view_pos.xy) - 0.5) * step;
   var t = max(t_near, 0.0) + step * 0.5 + jitter;
-  var max_val = 0.0;
+  var acc = 0.0;
+  var sum = 0.0;
+  var count = 0.0;
   var has_valid_sample = false;
 
   for (var i = 0; i < MAX_STEPS; i++) {
@@ -196,12 +209,20 @@ fn fs_main(input: VertexOut) -> @location(0) vec4f {
 
     // Only accumulate valid samples (val >= 0 means tile is loaded)
     if (val >= 0.0) {
+      if (!has_valid_sample) {
+        acc = val;  // first sample seeds both max and min accumulation
+      } else if (is_mip) {
+        acc = max(acc, val);
+      } else if (!is_mean) {
+        acc = min(acc, val);
+      }
+      sum += val;
+      count += 1.0;
       has_valid_sample = true;
-      max_val = max(max_val, val);
     }
 
     // Early exit for MIP
-    if (max_val >= MIP_EARLY_EXIT) { break; }
+    if (is_mip && acc >= MIP_EARLY_EXIT) { break; }
 
     t += step;
   }
@@ -211,8 +232,14 @@ fn fs_main(input: VertexOut) -> @location(0) vec4f {
     discard;
   }
 
-  // Apply contrast
-  let norm = clamp(max_val * params.contrast.x + params.contrast.y, 0.0, 1.0);
+  // Mean normalizes to the average of samples; mip/minip use the extremes.
+  var final_val = acc;
+  if (is_mean) {
+    final_val = sum / count;
+  }
+
+  // Apply contrast (identical window across modes)
+  let norm = clamp(final_val * params.contrast.x + params.contrast.y, 0.0, 1.0);
   let color = textureSample(colormap_tex, colormap_smpl, vec2f(norm, 0.5));
   return vec4f(color.rgb, color.a * params.opacity);
 }
