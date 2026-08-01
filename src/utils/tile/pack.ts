@@ -16,13 +16,13 @@ import { floatToFloat16 } from "./float16";
  * onto [0, 1]; anything else passes through unchanged (scale 1, offset 0).
  */
 export function dtypeNormalization(dtype: string): { scale: number; offset: number } {
-  if (dtype.includes("uint8") || dtype === "|u1") {
+  if (dtype.includes("uint8") || dtype === "|u1" || dtype === "<u1" || dtype === ">u1") {
     return { scale: 1 / 255,   offset: 0 };
   }
   if (dtype.includes("uint16") || dtype.includes("<u2") || dtype.includes(">u2")) {
     return { scale: 1 / 65535, offset: 0 };
   }
-  if (dtype.includes("int8") || dtype === "|i1") {
+  if (dtype.includes("int8") || dtype === "|i1" || dtype === "<i1" || dtype === ">i1") {
     return { scale: 1 / 255,   offset: 128 };
   }
   if (dtype.includes("int16") || dtype.includes("<i2") || dtype.includes(">i2")) {

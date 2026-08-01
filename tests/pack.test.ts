@@ -11,9 +11,12 @@ describe("dtypeNormalization", () => {
   it("maps integer dtype ranges onto [0, 1]", () => {
     expect(dtypeNormalization("uint8")).toEqual({ scale: 1 / 255, offset: 0 });
     expect(dtypeNormalization("|u1")).toEqual({ scale: 1 / 255, offset: 0 });
+    expect(dtypeNormalization("<u1")).toEqual({ scale: 1 / 255, offset: 0 });
+    expect(dtypeNormalization(">u1")).toEqual({ scale: 1 / 255, offset: 0 });
     expect(dtypeNormalization("uint16")).toEqual({ scale: 1 / 65535, offset: 0 });
     expect(dtypeNormalization("<u2")).toEqual({ scale: 1 / 65535, offset: 0 });
     expect(dtypeNormalization("int8")).toEqual({ scale: 1 / 255, offset: 128 });
+    expect(dtypeNormalization("<i1")).toEqual({ scale: 1 / 255, offset: 128 });
     expect(dtypeNormalization("int16")).toEqual({ scale: 1 / 65535, offset: 32768 });
     expect(dtypeNormalization("<i2")).toEqual({ scale: 1 / 65535, offset: 32768 });
   });

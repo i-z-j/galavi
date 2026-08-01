@@ -201,6 +201,12 @@ export interface ChannelConfig {
 /**
  * One multiscale image level, normalized by an adapter into XYZ axis order.
  * Levels are ordered from finest to coarsest in {@link ImagePyramid.levels}.
+ *
+ * 2D (XY-only) datasets are first-class: the adapter represents the missing
+ * z axis as a singleton (`shape[2]` = `chunkSize[2]` = 1, with `scale[2]`
+ * conventionally matching the y scale). All fields stay 3-component
+ * regardless of source dimensionality, so tile pooling, planning, slicing,
+ * and navigation need no 2D special cases.
  */
 export interface ImagePyramidLevel {
   /** Format-specific source path for diagnostics and custom fetchers. */
@@ -218,6 +224,9 @@ export interface ImagePyramidLevel {
  *
  * Adapters for OME-Zarr, OME-TIFF, and future formats normalize their native
  * metadata into this interface; format parsing does not belong in Galavi.
+ *
+ * The pyramid is always XYZ: a 2D (XY-only) source is represented with a
+ * singleton z (see {@link ImagePyramidLevel}), never with 2-component fields.
  */
 export interface ImagePyramid {
   levels: ImagePyramidLevel[];
