@@ -46,6 +46,7 @@ export class TileManager<T extends TilePlacement> {
   private loader?       : TileLoader<T>;
   private onUpdate?     : () => void;
   private desiredTiles  = new Set<string>();
+  private warnedBudget  = false;
 
   constructor(maxConcurrent = 4) {
     this.queue = new TileLoadQueue<T>(maxConcurrent);
@@ -93,15 +94,36 @@ export class TileManager<T extends TilePlacement> {
     const pool = this.pool;
     if (!pool) return {};
 
-    const cellCount  = plan.tiles.length;
-    if (cellCount >= pool.capacity) {
-      throw new Error(
-        `Visible tile count ${cellCount} exceeds tile cache budget ${pool.capacity - 1}`,
-      );
+    const center = plan.viewportOrigin.map((origin, axis) => (
+      origin + plan.viewportSize[axis] / 2
+    ));
+
+    // If the visible set exceeds the cache (e.g. a volume whose z axis is
+    // never downsampled, so every level needs more slabs than fit), degrade
+    // gracefully: keep the tiles closest to the viewport center and leave the
+    // rest on the placeholder/coarser fallback instead of crashing the frame.
+    let tiles = plan.tiles;
+    if (tiles.length >= pool.capacity) {
+      if (!this.warnedBudget) {
+        this.warnedBudget = true;
+        console.warn(
+          `[TileManager] Visible tile count ${tiles.length} exceeds tile cache budget ${pool.capacity - 1}; ` +
+          "clamping to the closest tiles.",
+        );
+      }
+      tiles = [...plan.tiles]
+        .sort((a, b) => (
+          this.distanceFromCenter(a, center, plan.gridDim) -
+          this.distanceFromCenter(b, center, plan.gridDim)
+        ))
+        .slice(0, Math.max(1, pool.capacity - 1));
     }
-    const indices    = new Uint32Array(cellCount * 2);
+
+    // Index entries are addressed by gridIdx, which spans the full plan — keep
+    // the full width so clamped cells stay on slot 0 (placeholder/fallback).
+    const indices    = new Uint32Array(plan.tiles.length * 2);
     let displayedLevel: number | undefined;
-    for (const tile of plan.tiles) {
+    for (const tile of tiles) {
       const slot = pool.getSlot(tile.id) ?? 0;
       const fallback = slot === 0 ? this.findCoveringTile(tile, pool) : undefined;
       const fallbackSlot = fallback ? pool.getSlot(fallback.id) ?? 0 : slot;
@@ -118,10 +140,7 @@ export class TileManager<T extends TilePlacement> {
       pool.device.queue.writeBuffer(pool.indexBuffer, 0, indices);
     }
 
-    const center = plan.viewportOrigin.map((origin, axis) => (
-      origin + plan.viewportSize[axis] / 2
-    ));
-    const tilesToLoad = plan.tiles
+    const tilesToLoad = tiles
       .filter((tile) => {
         const hasSlot = pool.getSlot(tile.id) !== undefined;
         if (!hasSlot) this.loadedTiles.delete(tile.id);
@@ -133,7 +152,7 @@ export class TileManager<T extends TilePlacement> {
       ));
 
     this.setLoader(loader);
-    this.desiredTiles = new Set(plan.tiles.map((tile) => tile.id));
+    this.desiredTiles = new Set(tiles.map((tile) => tile.id));
     this.queue.setDesired(this.desiredTiles, tilesToLoad);
     this.pump();
     return { displayedLevel };

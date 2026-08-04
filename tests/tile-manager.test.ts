@@ -232,4 +232,27 @@ describe("TileManager", () => {
     await flushMicrotasks();
     expect(fetches.length).toBe(3);
   });
+
+  test("an over-budget plan is clamped to the closest tiles instead of throwing", () => {
+    const { manager } = makeManager(4);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const fetches: string[] = [];
+    const loader: TileLoader<TestTile> = {
+      fetch: (tile) => {
+        fetches.push(tile.id);
+        return new Promise(() => {});
+      },
+    };
+
+    // FakePool capacity is 16 — a 20-tile plan must not throw.
+    const tiles = Array.from({ length: 20 }, (_, i) => {
+      const tile = makeTile(`t${i}`, i);
+      // Spread tiles along x so the center-closest ones are the middle ids.
+      tile.region = { start: [i, 0, 0] as [number, number, number], size: [1, 1, 1] as [number, number, number] };
+      return tile;
+    });
+    expect(() => manager.commit(makePlan(tiles), loader)).not.toThrow();
+    expect(fetches.length).toBeLessThanOrEqual(15);
+    warn.mockRestore();
+  });
 });
