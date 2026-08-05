@@ -1,285 +1,403 @@
 // @vitest-environment jsdom
 
-import { FUI_THEME, MagnifierOverlay, type State } from '../src/index'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  FUI_THEME,
+  MagnifierOverlay,
+  type ImagePyramid,
+  type LayerConfig,
+  type State,
+} from "../src/index";
+import { overlayRegistry } from "../src/registry";
 
-const state = {
-  physical: {
-    spatial: {
-      origin: [0, 0, 0],
-      size: [400, 300, 1],
-    },
-  },
-  layers: [],
-  exploration: {
-    camera: {
-      navMode: 'fly',
-      projMode: 'orthographic',
-      position: [200, 150, 300],
-      target: [200, 150, 0],
-    },
-  },
-} satisfies State
+const pyramid: ImagePyramid = {
+  levels: [
+    { path: "0", shape: [400, 300, 100], chunkSize: [16, 16, 16], scale: [1, 1, 1] },
+    { path: "1", shape: [200, 150, 50], chunkSize: [16, 16, 16], scale: [2, 2, 2] },
+  ],
+};
+const fetchTile = () => Promise.resolve(new ArrayBuffer(16 * 16 * 16 * 2));
 
-describe('Galavi magnifier overlay', () => {
-  let overlay: MagnifierOverlay
-  let host: HTMLDivElement
+function makeLayers(): LayerConfig[] {
+  return [
+    {
+      id: "slice:c0",
+      type: "slice",
+      data: { pyramid, fetch: fetchTile },
+      options: { axes: [0, 1], sliceIndex: 50, selection: { c: 0 } },
+      render: { visible: true, color: "#FF0000", contrastLimits: [0.1, 0.6], blending: "additive" },
+    },
+    {
+      id: "slice:c1",
+      type: "slice",
+      data: { pyramid, fetch: fetchTile },
+      options: { axes: [0, 1], sliceIndex: 50, selection: { c: 1 } },
+      render: { visible: false, color: "#00FF00", contrastLimits: [0.2, 0.8], blending: "additive" },
+    },
+  ];
+}
+
+function makeState(distance = 300): State {
+  return {
+    physical: {
+      spatial: { origin: [0, 0, 0], size: [400, 300, 100], unit: "µm" },
+      channels: { names: ["Red", "Green"] },
+    },
+    layers: makeLayers(),
+    exploration: {
+      camera: {
+        navMode: "fly",
+        projMode: "orthographic",
+        position: [200, 150, 50 + distance],
+        target: [200, 150, 50],
+      },
+    },
+  };
+}
+
+function cloneState(state: State): State {
+  return {
+    physical: state.physical ? structuredClone(state.physical) : undefined,
+    layers: state.layers.map((layer) => ({
+      ...layer,
+      data: layer.data ? { ...layer.data } : undefined,
+      options: layer.options ? structuredClone(layer.options) : undefined,
+      render: layer.render ? structuredClone(layer.render) : undefined,
+    })),
+    exploration: structuredClone(state.exploration),
+  };
+}
+
+function fakeNested(initial: State, resolution = { level: 0, targetLevel: 0, refining: false }) {
+  let state = cloneState(initial);
+  const destroy = vi.fn();
+  const setRender = vi.fn((partial: Record<string, unknown>) => {
+    const target = state.layers.find((layer) => layer.id === "slice:c0");
+    if (target) target.render = { ...(target.render ?? {}), ...partial };
+  });
+  return {
+    instance: {
+      getState: () => cloneState(state),
+      setState: (next: State) => { state = next; },
+      requestRender: vi.fn(),
+      destroy,
+      layer: () => ({ setRender }),
+      view: () => ({ getResolution: () => ({
+        ...resolution,
+        sourceUnitsPerPixel: 1,
+        viewportUnitsPerPixel: 1,
+        unitsPerPixel: 1,
+      }) }),
+    },
+    getState: () => state,
+    destroy,
+    setRender,
+  };
+}
+
+describe("MagnifierOverlay", () => {
+  let host: HTMLDivElement;
+  let canvas: HTMLCanvasElement;
 
   beforeEach(() => {
-    const canvas = document.createElement('canvas')
+    canvas = document.createElement("canvas");
     Object.defineProperties(canvas, {
       clientWidth: { value: 400 },
       clientHeight: { value: 300 },
-    })
+    });
+    host = document.createElement("div");
+    Object.defineProperty(host, "clientWidth", { value: 400 });
+    host.appendChild(canvas);
+    document.body.appendChild(host);
+  });
 
-    host = document.createElement('div')
-    host.appendChild(canvas)
-    document.body.appendChild(host)
+  afterEach(() => {
+    host.remove();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
 
-    overlay = new MagnifierOverlay()
+  function mount(dimension: "2d" | "3d", state = makeState()): MagnifierOverlay {
+    const overlay = new MagnifierOverlay(dimension);
     overlay.bindView({
-      getViewType: () => 'slice',
-      getLayerIds: () => [],
+      getViewType: () => "slice",
+      getLayerIds: () => state.layers.map((layer) => layer.id),
       getCanvas: () => canvas,
       isActive: () => true,
       getAxisMap: () => [0, 1, 2] as const,
       getTheme: () => FUI_THEME,
       getOwner: () => undefined,
-    })
-    overlay.setOptions({ position: [200, 150, 0], size: 100, zoom: 4 })
-    overlay.mount(host)
-  })
+    });
+    overlay.setOptions({ position: [200, 150, 50], size: 100, zoom: 4 });
+    overlay.mount(host);
+    return overlay;
+  }
 
-  afterEach(() => {
-    overlay.unmount()
-    host.remove()
-  })
+  it("registers only the two explicit variants", () => {
+    expect((overlayRegistry.create("magnifier-2d") as any).dimension).toBe("2d");
+    expect((overlayRegistry.create("magnifier-3d") as any).dimension).toBe("3d");
+    expect(() => overlayRegistry.create("magnifier")).toThrow();
+  });
 
-  it('shows the inset, source footprint, and one nearest-corner leader', () => {
-    overlay.render(state)
+  it("restores the original dynamic 2D pixel footprint", () => {
+    const overlay = mount("2d");
+    overlay.render(makeState(300));
+    const root = host.children[1] as HTMLDivElement;
+    const indicator = root.querySelector("rect")!;
+    expect(Number(indicator.getAttribute("width"))).toBeCloseTo(25);
+    expect(Number(indicator.getAttribute("height"))).toBeCloseTo(25);
 
-    const root = host.children[1] as HTMLDivElement
-    const shell = root.children[1] as HTMLDivElement
-    const source = root.querySelector('rect')
-    const leaders = root.querySelectorAll('line')
+    overlay.setOptions({ zoom: 2 });
+    overlay.render(makeState(150));
+    expect(Number(indicator.getAttribute("width"))).toBeCloseTo(50);
+    expect(Number(indicator.getAttribute("height"))).toBeCloseTo(50);
+    overlay.unmount();
+  });
 
-    expect(root.style.display).toBe('block')
-    expect(root.style.width).toBe('400px')
-    expect(root.style.height).toBe('300px')
-    expect(shell.style.display).toBe('block')
-    expect(shell.style.left).toBe('228.5px')
-    expect(shell.style.top).toBe('21.5px')
-    expect(source?.getAttribute('x')).toBe('187.5')
-    expect(source?.getAttribute('y')).toBe('137.5')
-    expect(source?.getAttribute('width')).toBe('25')
-    expect(source?.getAttribute('height')).toBe('25')
-    expect(leaders).toHaveLength(1)
-    expect(leaders[0]?.getAttribute('x1')).toBe('212.5')
-    expect(leaders[0]?.getAttribute('y1')).toBe('137.5')
-    expect(leaders[0]?.getAttribute('x2')).toBe('228.5')
-    expect(leaders[0]?.getAttribute('y2')).toBe('121.5')
-  })
+  it("keeps 2D layers free of physical-region and forced-level options", () => {
+    const state = makeState();
+    const overlay = mount("2d", state);
+    const nested = fakeNested(state);
+    Object.assign(overlay, { nested: nested.instance, mountedLayerIds: state.layers.map((layer) => layer.id) });
 
-  it('moves the inset inside the image when the cursor nears an edge', () => {
-    overlay.setOptions({ position: [390, 10, 0] })
-    overlay.render(state)
+    overlay.render(state);
 
-    const root = host.children[1] as HTMLDivElement
-    const shell = root.children[1] as HTMLDivElement
-    const leader = root.querySelector('line')
+    const wrapped = nested.getState().layers[0];
+    expect(wrapped.type).toBe("slice");
+    expect(wrapped.options).toMatchObject({
+      selection: { c: 0 },
+    });
+    expect(wrapped.options?.region).toBeUndefined();
+    expect(wrapped.options?.finestLevel).toBeUndefined();
+    expect(wrapped.render).toMatchObject({ color: "#FF0000", contrastLimits: [0.1, 0.6] });
+    overlay.unmount();
+  });
 
-    expect(shell.style.left).toBe('259px')
-    expect(shell.style.top).toBe('41px')
-    expect(leader?.getAttribute('x1')).toBe('375')
-    expect(leader?.getAttribute('y1')).toBe('25')
-    expect(leader?.getAttribute('x2')).toBe('359')
-    expect(leader?.getAttribute('y2')).toBe('41')
-  })
+  it("restores the original parent-derived 2D follow camera", () => {
+    const state = makeState(300);
+    const overlay = mount("2d", state);
+    const nested = fakeNested(state);
+    Object.assign(overlay, { nested: nested.instance, mountedLayerIds: state.layers.map((layer) => layer.id) });
 
-  it('keeps one connector corner through subpixel edge jitter', () => {
-    const shellLeft: number[] = []
-    const connectorOffsets: Array<[number, number]> = []
+    overlay.render(state);
 
-    for (const x of [271.49, 271.51, 271.49, 271.51]) {
-      overlay.setOptions({ position: [x, 150, 0] })
-      overlay.render(state)
+    expect(nested.getState().exploration.camera.target).toEqual([200, 150, 50]);
+    expect(nested.getState().exploration.camera.position).toEqual([200, 150, 75]);
+    overlay.unmount();
+  });
 
-      const root = host.children[1] as HTMLDivElement
-      const shell = root.children[1] as HTMLDivElement
-      const source = root.querySelector('rect')
-      const leader = root.querySelector('line')
-      const sourceRight = Number(source?.getAttribute('x')) + Number(source?.getAttribute('width'))
-      const insetLeft = Number.parseFloat(shell.style.left)
+  it("keeps 2D channel state synchronized with the parent", () => {
+    const state = makeState();
+    const overlay = mount("2d", state);
+    const nested = fakeNested(state);
+    Object.assign(overlay, { nested: nested.instance, mountedLayerIds: state.layers.map((layer) => layer.id) });
+    overlay.render(state);
 
-      shellLeft.push(insetLeft)
-      connectorOffsets.push([
-        Number(leader?.getAttribute('x1')) - sourceRight,
-        Number(leader?.getAttribute('x2')) - insetLeft,
-      ])
-    }
+    const next = makeState();
+    next.layers[0].options = { ...next.layers[0].options, selection: { c: 1 } };
+    next.layers[0].render = { visible: true, color: "#0000FF", contrastLimits: [0.3, 0.9] };
+    overlay.render(next);
 
-    expect(Math.max(...shellLeft) - Math.min(...shellLeft)).toBeLessThan(1)
-    expect(connectorOffsets).toEqual(Array.from({ length: 4 }, () => [0, 0]))
-  })
+    expect(nested.getState().layers[0]).toMatchObject({
+      options: { selection: { c: 1 } },
+      render: { visible: true, color: "#0000FF", contrastLimits: [0.3, 0.9] },
+    });
+    overlay.unmount();
+  });
 
-  it('keeps the current corner through an equal-distance tie', () => {
-    overlay.setOptions({ position: [271.49, 150, 0] })
-    overlay.render(state)
+  it("converts selected 3D layers to cropped MIP volume layers", () => {
+    const state = makeState();
+    const overlay = mount("3d", state);
+    const nested = fakeNested(state);
+    Object.assign(overlay, { nested: nested.instance, mountedLayerIds: state.layers.map((layer) => layer.id) });
 
-    const sourceOffsets: number[] = []
-    for (const x of [299.99, 300.01, 299.99, 300.01]) {
-      overlay.setOptions({ position: [x, 150, 0] })
-      overlay.render(state)
+    overlay.render(state);
 
-      const root = host.children[1] as HTMLDivElement
-      const source = root.querySelector('rect')
-      const leader = root.querySelector('line')
-      const sourceRight = Number(source?.getAttribute('x')) + Number(source?.getAttribute('width'))
-      sourceOffsets.push(Number(leader?.getAttribute('x1')) - sourceRight)
-    }
-
-    expect(sourceOffsets).toEqual([0, 0, 0, 0])
-  })
-
-  it('uses the projected image edge instead of the canvas edge', () => {
-    const imageState = structuredClone(state) as State
-    imageState.physical = {
-      spatial: {
-        origin: [100, 50, 0],
-        size: [200, 200, 1],
+    const wrapped = nested.getState().layers[0];
+    expect(wrapped.type).toBe("volume");
+    expect(wrapped.data?.pyramid).toBe(pyramid);
+    expect(wrapped.options).toMatchObject({
+      finestLevel: true,
+      region: {
+        min: [184 / 400, 134 / 300, 34 / 100],
+        max: [216 / 400, 166 / 300, 66 / 100],
       },
-    }
-    overlay.setOptions({ position: [290, 60, 0] })
-    overlay.render(imageState)
+    });
+    expect(wrapped.render).toMatchObject({ mode: "mip", contrastLimits: [0.1, 0.6] });
+    overlay.unmount();
+  });
 
-    const root = host.children[1] as HTMLDivElement
-    const shell = root.children[1] as HTMLDivElement
-    const source = root.querySelector('rect')
+  it("honors a configured 3D voxel extent", () => {
+    const state = makeState();
+    const overlay = mount("3d", state);
+    overlay.setOptions({ voxelExtent3d: 16 });
+    const nested = fakeNested(state);
+    Object.assign(overlay, { nested: nested.instance, mountedLayerIds: state.layers.map((layer) => layer.id) });
 
-    expect(Number.parseFloat(shell.style.left)).toBeCloseTo(159)
-    expect(Number.parseFloat(shell.style.top)).toBeCloseTo(91)
-    expect(Number.parseFloat(source?.getAttribute('x') ?? '')).toBeCloseTo(275)
-    expect(Number.parseFloat(source?.getAttribute('y') ?? '')).toBeCloseTo(50)
-    expect(Number.parseFloat(shell.style.left) + 100).toBeLessThanOrEqual(300)
-  })
+    overlay.render(state);
 
-  it('derives every follow camera from the parent view', () => {
-    let nestedState = structuredClone(state) as State
+    const readout = (host.children[1] as HTMLDivElement).querySelector<HTMLElement>('[data-magnifier-size]')!;
+    expect(readout.textContent).toBe("16 vx");
+    expect(nested.getState().layers[0].options).toMatchObject({
+      region: {
+        min: [192 / 400, 142 / 300, 42 / 100],
+        max: [208 / 400, 158 / 300, 58 / 100],
+      },
+    });
+    overlay.unmount();
+  });
+
+  it("steps 3D extent through 16, 32, and 64 without recreating the nested view", () => {
+    const state = makeState();
+    const overlay = mount("3d", state);
+    const nested = fakeNested(state, { level: 1, targetLevel: 0, refining: true });
+    Object.assign(overlay, { nested: nested.instance, mountedLayerIds: state.layers.map((layer) => layer.id) });
+    overlay.render(state);
+    const root = host.children[1] as HTMLDivElement;
+    const decrement = root.querySelector<HTMLButtonElement>('[aria-label="Decrease 3D block size"]')!;
+    const increment = root.querySelector<HTMLButtonElement>('[aria-label="Increase 3D block size"]')!;
+    const readout = root.querySelector<HTMLElement>('[data-magnifier-size]')!;
+    const loading = root.querySelector<HTMLElement>('[role="status"]')!;
+
+    expect(readout.textContent).toBe("32 vx");
+    decrement.click();
+    expect(readout.textContent).toBe("16 vx");
+    expect((overlay as any).opts.voxelExtent3d).toBe(16);
+    expect(nested.destroy).not.toHaveBeenCalled();
+    expect(loading.style.display).toBe("block");
+
+    increment.click();
+    increment.click();
+    expect(readout.textContent).toBe("64 vx");
+    expect((overlay as any).opts.voxelExtent3d).toBe(64);
+    expect(nested.destroy).not.toHaveBeenCalled();
+    overlay.render(state);
+    expect(nested.getState().layers[0].options).toMatchObject({
+      region: {
+        min: [168 / 400, 118 / 300, 18 / 100],
+        max: [232 / 400, 182 / 300, 82 / 100],
+      },
+    });
+    overlay.unmount();
+  });
+
+  it("preserves the 3D camera direction when a pinned position changes", () => {
+    const state = makeState();
+    const overlay = mount("3d", state);
+    const nested = fakeNested(state);
+    Object.assign(overlay, { nested: nested.instance, mountedLayerIds: state.layers.map((layer) => layer.id) });
+    overlay.render(state);
+    nested.getState().exploration.camera.position = [220, 150, 70];
+    nested.getState().exploration.camera.target = [200, 150, 50];
+
+    overlay.setOptions({ position: [240, 150, 50] });
+    overlay.render(state);
+
+    const camera = nested.getState().exploration.camera;
+    expect(camera.navMode).toBe("orbit");
+    expect(camera.projMode).toBe("perspective");
+    expect(camera.target[0]).toBeCloseTo(240);
+    expect(camera.position[0] - camera.target[0]).toBeCloseTo(camera.position[2] - camera.target[2]);
+    overlay.unmount();
+  });
+
+  it("builds local per-channel controls without mutating parent state", () => {
+    const state = makeState();
+    const overlay = mount("3d", state);
+    const nested = fakeNested(state);
+    Object.assign(overlay, { nested: nested.instance, mountedLayerIds: state.layers.map((layer) => layer.id) });
+    overlay.render(state);
+    (overlay as any).rebuildChannelPanel(state, (overlay as any).prepare3d(state));
+
+    const root = host.children[1] as HTMLDivElement;
+    const channels = root.querySelectorAll<HTMLElement>('[data-magnifier-channel]');
+    const sliders = root.querySelectorAll<HTMLElement>('.range-slider');
+    const thumbs = root.querySelectorAll<HTMLButtonElement>('.range-thumb');
+    const visibility = root.querySelector<HTMLButtonElement>('[aria-label="Hide Red"]')!;
+    expect(channels).toHaveLength(2);
+    expect(sliders).toHaveLength(2);
+    expect(thumbs).toHaveLength(4);
+    visibility.click();
+
+    expect(nested.setRender).toHaveBeenCalledWith(expect.objectContaining({ visible: false }));
+    Object.defineProperty(sliders[0], "getBoundingClientRect", {
+      value: () => ({ left: 0, width: 100, top: 0, right: 100, bottom: 24, height: 24, x: 0, y: 0, toJSON: () => ({}) }),
+    });
+    thumbs[0].dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientX: 60 }));
+    window.dispatchEvent(new MouseEvent("mouseup"));
+    expect(nested.setRender).toHaveBeenCalledWith(expect.objectContaining({ contrastLimits: expect.any(Array) }));
+    expect(state.layers[0].render?.visible).toBe(true);
+    overlay.unmount();
+  });
+
+  it("folds the channel panel into a tab attached to the overlay side", () => {
+    const state = makeState();
+    const overlay = mount("3d", state);
+    const nested = fakeNested(state);
+    Object.assign(overlay, { nested: nested.instance, mountedLayerIds: state.layers.map((layer) => layer.id) });
+    overlay.render(state);
+    (overlay as any).rebuildChannelPanel(state, (overlay as any).prepare3d(state));
+    const root = host.children[1] as HTMLDivElement;
+    const tab = root.querySelector<HTMLButtonElement>('[aria-label="Collapse channels"]')!;
+    const panel = root.querySelector<HTMLElement>('[data-magnifier-channel-panel]')!;
+
+    expect(tab).toBeTruthy();
+    expect(panel.style.display).toBe("block");
+    tab.click();
+    expect(tab.getAttribute("aria-label")).toBe("Expand channels");
+    expect(panel.style.display).toBe("none");
+    expect((overlay as any).nested).toBe(nested.instance);
+    tab.click();
+    expect(panel.style.display).toBe("block");
+    overlay.unmount();
+  });
+
+  it("shows a loading badge until target level 0 is fully resident", () => {
+    const state = makeState();
+    const overlay = mount("3d", state);
+    const nested = fakeNested(state, { level: 1, targetLevel: 0, refining: true });
+    Object.assign(overlay, { nested: nested.instance, mountedLayerIds: state.layers.map((layer) => layer.id) });
+    overlay.render(state);
+    const loading = (host.children[1] as HTMLDivElement).querySelector<HTMLElement>('[role="status"]')!;
+    expect(loading.style.display).toBe("block");
+    overlay.unmount();
+  });
+
+  it("pauses 3D spin during interaction and resumes after one second", () => {
+    vi.useFakeTimers();
+    const requestFrame = vi.fn(() => 17);
+    vi.stubGlobal("requestAnimationFrame", requestFrame);
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    const state = makeState();
+    const overlay = mount("3d", state);
+    const nested = fakeNested(state);
     Object.assign(overlay, {
-      nested: {
-        getState: () => structuredClone(nestedState),
-        setState: (next: State) => { nestedState = next },
-        requestRender: () => undefined,
-        destroy: () => undefined,
-      },
-    })
+      nested: nested.instance,
+      mountedLayerIds: state.layers.map((layer) => layer.id),
+      renderActive: true,
+    });
+    (overlay as any).pauseSpin();
+    expect((overlay as any).spinPaused).toBe(true);
+    (overlay as any).scheduleSpinResume();
+    vi.advanceTimersByTime(999);
+    expect((overlay as any).spinPaused).toBe(true);
+    vi.advanceTimersByTime(1);
+    expect((overlay as any).spinPaused).toBe(false);
+    expect(requestFrame).toHaveBeenCalled();
+    overlay.unmount();
+  });
 
-    overlay.render(state)
-    expect(nestedState.exploration.camera.target).toEqual([200, 150, 0])
-    expect(nestedState.exploration.camera.position).toEqual([200, 150, 25])
+  it("destroys nested rendering and clears the pin when disabled", () => {
+    const state = makeState();
+    const overlay = mount("3d", state);
+    const nested = fakeNested(state);
+    Object.assign(overlay, { nested: nested.instance });
 
-    overlay.setOptions({ position: [210, 150, 0] })
-    overlay.render(state)
-    expect(nestedState.exploration.camera.target).toEqual([210, 150, 0])
-    expect(nestedState.exploration.camera.position).toEqual([210, 150, 25])
-  })
+    overlay.setOptions({ visible: false });
 
-  it('mirrors a current-channel change on an existing layer', () => {
-    const initialChannelState: State = {
-      ...structuredClone(state),
-      layers: [{
-        id: 'volume',
-        type: 'volume',
-        options: { selection: { c: 0 } },
-        render: { visible: true, color: '#FF0000', contrastLimits: [0, 1] },
-      }],
-    }
-    let nestedState = structuredClone(initialChannelState)
-    Object.assign(overlay, {
-      nested: {
-        getState: () => structuredClone(nestedState),
-        setState: (next: State) => { nestedState = next },
-        requestRender: () => undefined,
-        destroy: () => undefined,
-      },
-    })
-
-    overlay.render(initialChannelState)
-    overlay.render({
-      ...structuredClone(state),
-      layers: [{
-        id: 'volume',
-        type: 'volume',
-        options: { selection: { c: 2 } },
-        render: { visible: true, color: '#0000FF', contrastLimits: [0.2, 0.7] },
-      }],
-    })
-
-    expect(nestedState.layers[0]).toMatchObject({
-      id: 'volume',
-      options: { selection: { c: 2 } },
-      render: { visible: true, color: '#0000FF', contrastLimits: [0.2, 0.7] },
-    })
-  })
-
-  it('mirrors the current channel selection and visible channel composition', () => {
-    const initialChannelState: State = {
-      ...structuredClone(state),
-      layers: [
-        {
-          id: 'slice:c0',
-          type: 'slice',
-          options: { selection: { c: 0 } },
-          render: { visible: true, color: '#FF0000', contrastLimits: [0, 1] },
-        },
-        {
-          id: 'slice:c1',
-          type: 'slice',
-          options: { selection: { c: 1 } },
-          render: { visible: false, color: '#00FF00', contrastLimits: [0, 1] },
-        },
-      ],
-    }
-    let nestedState = structuredClone(initialChannelState)
-    Object.assign(overlay, {
-      nested: {
-        getState: () => structuredClone(nestedState),
-        setState: (next: State) => { nestedState = next },
-        requestRender: () => undefined,
-        destroy: () => undefined,
-      },
-    })
-
-    overlay.render(initialChannelState)
-    overlay.render({
-      ...structuredClone(state),
-      layers: [
-        {
-          id: 'slice:c0',
-          type: 'slice',
-          options: { selection: { c: 0 } },
-          render: { visible: false, color: '#FF0000', contrastLimits: [0.1, 0.4] },
-        },
-        {
-          id: 'slice:c1',
-          type: 'slice',
-          options: { selection: { c: 1 } },
-          render: { visible: true, color: '#00FF00', contrastLimits: [0.2, 0.8] },
-        },
-      ],
-    })
-
-    expect(nestedState.layers).toMatchObject([
-      {
-        id: 'slice:c0',
-        options: { selection: { c: 0 } },
-        render: { visible: false, color: '#FF0000', contrastLimits: [0.1, 0.4] },
-      },
-      {
-        id: 'slice:c1',
-        options: { selection: { c: 1 } },
-        render: { visible: true, color: '#00FF00', contrastLimits: [0.2, 0.8] },
-      },
-    ])
-  })
-})
+    expect(nested.destroy).toHaveBeenCalledOnce();
+    expect((overlay as any).opts.position).toBeNull();
+    expect((overlay as any).nested).toBeUndefined();
+    overlay.unmount();
+  });
+});

@@ -8,7 +8,7 @@
 export class TileLoadQueue<T extends { id: string }> {
   private desiredTiles  = new Set<string>();
   private pendingTiles  : T[] = [];
-  private loadingTiles  = new Set<string>();
+  private loadingTiles  = new Map<string, number>();
   private inFlightLoads = 0;
   private generation    = 0;
 
@@ -38,8 +38,8 @@ export class TileLoadQueue<T extends { id: string }> {
     this.loadingTiles.clear();
   }
 
-  finish(id: string): void {
-    this.loadingTiles.delete(id);
+  finish(id: string, generation: number): void {
+    if (this.loadingTiles.get(id) === generation) this.loadingTiles.delete(id);
     this.inFlightLoads = Math.max(0, this.inFlightLoads - 1);
   }
 
@@ -57,7 +57,7 @@ export class TileLoadQueue<T extends { id: string }> {
       if (nextIndex < 0) return;
 
       const [tile] = this.pendingTiles.splice(nextIndex, 1);
-      this.loadingTiles.add(tile.id);
+      this.loadingTiles.set(tile.id, this.generation);
       this.inFlightLoads++;
       startLoad(tile, this.generation);
     }

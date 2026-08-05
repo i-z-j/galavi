@@ -12,7 +12,7 @@ Galavi is a WebGPU visualization library for shared-state scientific viewers. It
 - Built-in views: `volume` (3D perspective), `slice` (2D ortho), `navigator` (3D overview).
 - Built-in controls: `orbit`, `fly`, `panzoom` — pure reducers, view-local.
 - Automatic physical-scale resolution selection with coarse-first loading and dynamic visible storage chunks.
-- Built-in overlays: `crosshair`, `ruler`, `roiselector`, `magnifier`, `foldablepanel` — bound to a live view.
+- Built-in overlays: `crosshair`, `ruler`, `roiselector`, `magnifier-2d`, `magnifier-3d`, `foldablepanel` — bound to a live view.
 - Built-in layers: volume, slice, surface, shape, points, network, segmentation, vectors, tracks.
 - FUI overlay theme, customizable via `GalaviConfig.theme` and consumable by apps through `--galavi-*` CSS custom properties.
 - Extensible registries for layers, views, controls, and overlays — add your own without forking.

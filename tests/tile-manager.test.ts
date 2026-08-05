@@ -49,8 +49,24 @@ function makePlan(tiles: TestTile[]): TilePlan<TestTile> {
 /** Minimal duck-type of TilePool — only the surface TileManager touches. */
 class FakePool {
   readonly capacity     = 16;
-  readonly indexBuffer  = {};
-  readonly device       = { queue: { writeBuffer: () => {} } };
+  indexBuffer           = {};
+  private indexCapacity = this.capacity;
+  readonly device       = {
+    queue: {
+      writeBuffer: (_buffer: unknown, _offset: number, data: ArrayBufferView) => {
+        if (data.byteLength > this.indexCapacity * 2 * Uint32Array.BYTES_PER_ELEMENT) {
+          throw new RangeError("index buffer write exceeds resident tile capacity");
+        }
+      },
+    },
+  };
+
+  ensureIndexCapacity(entryCount: number): boolean {
+    if (entryCount <= this.indexCapacity) return false;
+    this.indexCapacity = entryCount;
+    this.indexBuffer = {};
+    return true;
+  }
   readonly uploadTile   = vi.fn();
   private slots         = new Map<string, number>();
 
@@ -106,11 +122,33 @@ describe("TileLoadQueue", () => {
     const started: string[] = [];
     queue.setDesired(["a", "b"], tiles);
 
-    queue.pump(() => true, (tile) => { started.push(tile.id); });
-    queue.finish("a");
+    let generation = 0;
+    queue.pump(() => true, (tile, currentGeneration) => {
+      generation = currentGeneration;
+      started.push(tile.id);
+    });
+    queue.finish("a", generation);
     queue.pump(() => true, (tile) => { started.push(tile.id); });
 
     expect(started).toEqual(["a", "b"]);
+  });
+
+  test("stale completion does not clear a replacement load with the same id", () => {
+    const queue = new TileLoadQueue<TestTile>(2);
+    const generations: number[] = [];
+    queue.setDesired(["a"], [makeTile("a", 0)]);
+    queue.pump(() => true, (_tile, generation) => generations.push(generation));
+    const staleGeneration = generations[0];
+
+    queue.reset();
+    queue.setDesired(["a"], [makeTile("a", 0)]);
+    queue.pump(() => true, (_tile, generation) => generations.push(generation));
+    expect(queue.isLoading("a")).toBe(true);
+
+    queue.finish("a", staleGeneration);
+    expect(queue.isLoading("a")).toBe(true);
+    queue.finish("a", generations[1]);
+    expect(queue.isLoading("a")).toBe(false);
   });
 
   test("pump skips tiles that are no longer desired", () => {
@@ -182,16 +220,79 @@ describe("TileManager", () => {
     manager.setOnUpdate(onUpdate);
 
     const d = deferred<ArrayBuffer>();
-    const loader: TileLoader<TestTile> = { fetch: () => d.promise };
+    let loadSignal: AbortSignal | undefined;
+    const loader: TileLoader<TestTile> = {
+      fetch: (_tile, signal) => {
+        loadSignal = signal;
+        return d.promise;
+      },
+    };
     manager.commit(makePlan([makeTile("a", 0)]), loader);
 
     manager.reset();
+    expect(loadSignal?.aborted).toBe(true);
     d.resolve(new ArrayBuffer(8));
     await flushMicrotasks();
 
     expect(pool.uploadTile).not.toHaveBeenCalled();
     expect(onUpdate).not.toHaveBeenCalled();
     expect(manager.loadedTiles.size).toBe(0);
+  });
+
+  test("replanning aborts superseded loads but preserves resident fallback tiles", async () => {
+    const { manager, pool } = makeManager(2);
+    const first = deferred<ArrayBuffer>();
+    let firstSignal: AbortSignal | undefined;
+    const firstLoader: TileLoader<TestTile> = {
+      fetch: (_tile, signal) => {
+        firstSignal = signal;
+        return first.promise;
+      },
+    };
+    manager.commit(makePlan([makeTile("old", 0)]), firstLoader);
+    pool.allocateSlot("coarse");
+    manager.loadedTiles.set("coarse", makeTile("coarse", 0));
+
+    const nextLoader: TileLoader<TestTile> = {
+      fetch: () => new Promise(() => {}),
+    };
+    manager.commit(makePlan([makeTile("new", 0)]), nextLoader);
+
+    expect(firstSignal?.aborted).toBe(true);
+    expect(pool.getSlot("coarse")).toBeDefined();
+    expect(manager.loadedTiles.has("coarse")).toBe(true);
+    first.resolve(new ArrayBuffer(8));
+    await flushMicrotasks();
+  });
+
+  test("a late stale rejection cannot delete a loaded replacement with the same id", async () => {
+    const { manager } = makeManager(2);
+    const stale = deferred<ArrayBuffer>();
+    manager.commit(makePlan([makeTile("a", 0)]), { fetch: () => stale.promise });
+
+    const replacement = deferred<ArrayBuffer>();
+    manager.commit(makePlan([makeTile("a", 0), makeTile("b", 1)]), {
+      fetch: (tile) => tile.id === "a" ? replacement.promise : new Promise(() => {}),
+    });
+    replacement.resolve(new ArrayBuffer(8));
+    await flushMicrotasks();
+    expect(manager.loadedTiles.has("a")).toBe(true);
+
+    stale.reject(new Error("late stale failure"));
+    await flushMicrotasks();
+    expect(manager.loadedTiles.has("a")).toBe(true);
+  });
+
+  test("reports whether every target tile is resident", async () => {
+    const { manager } = makeManager(2);
+    const data = deferred<ArrayBuffer>();
+    const loader: TileLoader<TestTile> = { fetch: () => data.promise };
+    const plan = makePlan([makeTile("a", 0)]);
+
+    expect(manager.commit(plan, loader).complete).toBe(false);
+    data.resolve(new ArrayBuffer(8));
+    await flushMicrotasks();
+    expect(manager.commit(plan, loader).complete).toBe(true);
   });
 
   test("a failed load is removed from loadedTiles and does not upload", async () => {
@@ -251,7 +352,8 @@ describe("TileManager", () => {
       tile.region = { start: [i, 0, 0] as [number, number, number], size: [1, 1, 1] as [number, number, number] };
       return tile;
     });
-    expect(() => manager.commit(makePlan(tiles), loader)).not.toThrow();
+    expect(manager.commit(makePlan(tiles), loader).indexBufferChanged).toBe(true);
+    expect(manager.commit(makePlan(tiles), loader).indexBufferChanged).toBe(false);
     expect(fetches.length).toBeLessThanOrEqual(15);
     warn.mockRestore();
   });

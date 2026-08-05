@@ -15,12 +15,16 @@ import type { TilePlacement, TilePlan } from "./planner";
  * Per-tile fetch strategy used by `TileManager.loadOne`.
  */
 export interface TileLoader<T extends { id: string }> {
-  fetch(req: T): Promise<ArrayBuffer>;
+  fetch(req: T, signal: AbortSignal): Promise<ArrayBuffer>;
 }
 
 export interface TileCommitResult {
   /** Coarsest resident level currently supplying any planned cell. */
   displayedLevel?: number;
+  /** Whether every tile in the target plan is resident. */
+  complete: boolean;
+  /** Whether the spatial index buffer grew and must be rebound before draw. */
+  indexBufferChanged: boolean;
 }
 
 /**
@@ -47,6 +51,7 @@ export class TileManager<T extends TilePlacement> {
   private onUpdate?     : () => void;
   private desiredTiles  = new Set<string>();
   private warnedBudget  = false;
+  private loadController = new AbortController();
 
   constructor(maxConcurrent = 4) {
     this.queue = new TileLoadQueue<T>(maxConcurrent);
@@ -92,7 +97,7 @@ export class TileManager<T extends TilePlacement> {
     loader  : TileLoader<T>,
   ): TileCommitResult {
     const pool = this.pool;
-    if (!pool) return {};
+    if (!pool) return { complete: false, indexBufferChanged: false };
 
     const center = plan.viewportOrigin.map((origin, axis) => (
       origin + plan.viewportSize[axis] / 2
@@ -119,8 +124,14 @@ export class TileManager<T extends TilePlacement> {
         .slice(0, Math.max(1, pool.capacity - 1));
     }
 
+    const nextDesired = new Set(tiles.map((tile) => tile.id));
+    if (!setsEqual(nextDesired, this.desiredTiles)) {
+      this.cancelLoads("Tile plan superseded");
+    }
+
     // Index entries are addressed by gridIdx, which spans the full plan — keep
     // the full width so clamped cells stay on slot 0 (placeholder/fallback).
+    const indexBufferChanged = pool.ensureIndexCapacity(plan.tiles.length);
     const indices    = new Uint32Array(plan.tiles.length * 2);
     let displayedLevel: number | undefined;
     for (const tile of tiles) {
@@ -152,10 +163,14 @@ export class TileManager<T extends TilePlacement> {
       ));
 
     this.setLoader(loader);
-    this.desiredTiles = new Set(tiles.map((tile) => tile.id));
+    this.desiredTiles = nextDesired;
     this.queue.setDesired(this.desiredTiles, tilesToLoad);
     this.pump();
-    return { displayedLevel };
+    return {
+      displayedLevel,
+      complete: plan.tiles.every((tile) => pool.getSlot(tile.id) !== undefined),
+      indexBufferChanged,
+    };
   }
 
   /** Schedule any pending tile loads up to the queue's concurrency limit. */
@@ -166,7 +181,7 @@ export class TileManager<T extends TilePlacement> {
     this.queue.pump(
       (tile) => pool.getSlot(tile.id) === undefined,
       (tile, generation) => {
-        void this.loadOne(tile, generation, pool, loader);
+        void this.loadOne(tile, generation, pool, loader, this.loadController.signal);
       },
     );
   }
@@ -176,9 +191,10 @@ export class TileManager<T extends TilePlacement> {
     generation: number,
     pool: TilePool,
     loader: TileLoader<T>,
+    signal: AbortSignal,
   ): Promise<void> {
     try {
-      const data = await loader.fetch(tile);
+      const data = await loader.fetch(tile, signal);
       if (!this.queue.shouldAccept(tile.id, generation)) return;
       if (pool.getSlot(tile.id) !== undefined) return;
       const slot = pool.allocateSlot(tile.id);
@@ -186,20 +202,29 @@ export class TileManager<T extends TilePlacement> {
       this.loadedTiles.set(tile.id, tile);
       this.onUpdate?.();
     } catch (e) {
-      console.warn(`[TileManager] Failed to load tile ${tile.id}:`, e);
-      this.loadedTiles.delete(tile.id);
+      const currentGeneration = generation === this.queue.currentGeneration;
+      if (currentGeneration && !(e instanceof DOMException && e.name === "AbortError")) {
+        console.warn(`[TileManager] Failed to load tile ${tile.id}:`, e);
+      }
+      if (currentGeneration) this.loadedTiles.delete(tile.id);
     } finally {
-      this.queue.finish(tile.id);
+      this.queue.finish(tile.id, generation);
       this.pump();
     }
   }
 
   /** Drop all in-flight loads, cached placements, desired IDs, and pool residency. */
   reset(): void {
-    this.queue.reset();
+    this.cancelLoads("Tile residency reset");
     this.loadedTiles.clear();
     this.desiredTiles.clear();
     this.pool?.reset();
+  }
+
+  private cancelLoads(reason: string): void {
+    this.loadController.abort(new DOMException(reason, "AbortError"));
+    this.loadController = new AbortController();
+    this.queue.reset();
   }
 
   private findCoveringTile(tile: T, pool: TilePool): T | undefined {
@@ -230,4 +255,12 @@ export class TileManager<T extends TilePlacement> {
     }
     return distance;
   }
+}
+
+function setsEqual(first: ReadonlySet<string>, second: ReadonlySet<string>): boolean {
+  if (first.size !== second.size) return false;
+  for (const value of first) {
+    if (!second.has(value)) return false;
+  }
+  return true;
 }

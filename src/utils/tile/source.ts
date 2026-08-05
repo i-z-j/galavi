@@ -7,6 +7,7 @@ import type { Data, ImagePyramid } from "../../types";
 export interface TileCoord {
   level     : number;
   position  : number[]; // [x, y] for 2D, [x, y, z] for 3D
+  signal?   : AbortSignal;
 }
 
 /** Tile source — describes a tiled dataset for the tile pool / loader */
@@ -26,6 +27,7 @@ export function buildTileFetcher(
         level     : coord.level,
         position  : coord.position,
         selection,
+        signal    : coord.signal,
       });
     };
   }
@@ -33,7 +35,7 @@ export function buildTileFetcher(
   return async (coord) => {
     assertValidLevel(coord.level);
     const url   = buildTileUrl(source, coord, selection);
-    const resp  = await fetch(url);
+    const resp  = await fetch(url, { signal: coord.signal });
     if (!resp.ok) throw new Error(`Tile fetch failed: ${resp.status}`);
     return resp.arrayBuffer();
   };

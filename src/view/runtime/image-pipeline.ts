@@ -15,6 +15,7 @@ import {
   getColormapLUT,
   TileManager,
   type TilePlacement,
+  type TilePool,
   type TileViewport,
 } from "../../utils";
 import { COLORMAP_TEXTURE_WIDTH, DEPTH_FORMAT } from "../../defaults";
@@ -55,6 +56,8 @@ interface LayerRenderer {
   automaticTileLevel?: number;
   /** Resolution currently requested/displayed by this view renderer. */
   resolution?        : ViewResolution;
+  /** Whether this renderer currently owns active tile residency. */
+  tilesActive        : boolean;
   showingInitialTiles: boolean;
   /** Layer.dataVersion at last sync — drop tile residency when it bumps. */
   lastDataVersion    : number;
@@ -177,6 +180,14 @@ export class ImagePipeline {
     for (const layer of layers) {
       const ds = this.states.get(layer.id);
       if (!ds || !ds.tileManager) continue;
+      if (!layer.visible || !layer.isReady) {
+        if (ds.tilesActive) {
+          this.resetTileResidency(ds);
+          ds.tilesActive = false;
+        }
+        continue;
+      }
+      ds.tilesActive = true;
       const pool = ds.tileManager.pool;
       if (!pool) continue;
 
@@ -200,12 +211,16 @@ export class ImagePipeline {
       const targetLevel = frame.plan.level;
       if (!showingInitial) ds.automaticTileLevel = targetLevel;
       const commit = ds.tileManager.commit(frame.plan, frame.loader);
+      if (commit.indexBufferChanged) {
+        ds.tileBindGroup = this.createTileBindGroup(ds.pipeline, pool, layer.id);
+      }
       const displayedLevel = commit.displayedLevel ?? targetLevel;
       const sourceUnitsPerPixel = layer.getLevelResolution(displayedLevel);
       if (sourceUnitsPerPixel !== undefined) {
         ds.resolution = {
           level                 : displayedLevel,
           targetLevel,
+          refining              : !commit.complete || displayedLevel !== targetLevel,
           sourceUnitsPerPixel,
           viewportUnitsPerPixel : frameViewport.worldUnitsPerPixel,
           unitsPerPixel         : Math.max(
@@ -419,21 +434,14 @@ export class ImagePipeline {
         ],
       });
 
-      const tileBindGroup = device.createBindGroup({
-        label  : `${label} ${layer.id} TileBindGroup`,
-        layout : pipeline.getBindGroupLayout(1),
-        entries: [
-          { binding: 0, resource: { buffer: tilePool.indexBuffer } },
-          { binding: 1, resource: { buffer: tilePool.readyBuffer } },
-          { binding: 2, resource: { buffer: tilePool.regionBuffer } },
-        ],
-      });
+      const tileBindGroup = this.createTileBindGroup(pipeline, tilePool, layer.id);
 
       return {
         pipeline, vertexBuffer, paramsBuffer, modelBuffer: tileModelBuffer,
         bindGroup, tileBindGroup, colormapTexture, layer,
         tileManager,
         initialTileLevel  : tileSpec!.initialLevel,
+        tilesActive       : false,
         showingInitialTiles: true,
         geometryVersion    : layer.geometryVersion,
         lastBlending       : layer.blending,
@@ -471,6 +479,7 @@ export class ImagePipeline {
     return {
       pipeline, vertexBuffer, paramsBuffer, modelBuffer,
       storageBuffer, bindGroup, layer,
+      tilesActive          : false,
       showingInitialTiles: false,
       geometryVersion    : layer.geometryVersion,
       lastBlending       : layer.blending,
@@ -489,6 +498,22 @@ export class ImagePipeline {
       [COLORMAP_TEXTURE_WIDTH, 1],
     );
     ds.lastColormapVersion = ds.layer.colormapVersion;
+  }
+
+  private createTileBindGroup(
+    pipeline : GPURenderPipeline,
+    tilePool : TilePool,
+    layerId  : string,
+  ): GPUBindGroup {
+    return this.opts.device.createBindGroup({
+      label  : `${this.opts.label} ${layerId} TileBindGroup`,
+      layout : pipeline.getBindGroupLayout(1),
+      entries: [
+        { binding: 0, resource: { buffer: tilePool.indexBuffer } },
+        { binding: 1, resource: { buffer: tilePool.readyBuffer } },
+        { binding: 2, resource: { buffer: tilePool.regionBuffer } },
+      ],
+    });
   }
 
   /**

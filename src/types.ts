@@ -240,6 +240,8 @@ export interface ViewResolution {
   level                 : number;
   /** Best-fit level currently requested by automatic selection. */
   targetLevel           : number;
+  /** True until every tile in the target-level plan is resident. */
+  refining              : boolean;
   /** Physical units per source pixel/voxel at `level`. */
   sourceUnitsPerPixel   : number;
   /** Physical world units represented by one canvas pixel. */
@@ -296,11 +298,12 @@ export interface Data {
    * @example "{url}:img3d:{level}:{c}:{z},{y},{x}"
    */
   urlTemplate?: string;
-  /** Custom fetch function (overrides urlTemplate) */
+  /** Custom fetch function (overrides urlTemplate); honor `signal` when possible. */
   fetch?: (options?: {
     level?: number;
     position?: number[];
     selection?: Record<string, number>;
+    signal?: AbortSignal;
   }) => Promise<ArrayBuffer>;
 
   transform?: number[]; // Optional 4×4 affine matrix, column-major

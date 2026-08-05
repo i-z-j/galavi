@@ -19,5 +19,9 @@ export {
   type RoiSelectionsChangeCallback,
   type RoiActiveIndexChangeCallback,
 } from "./roi-selector";
-export { MagnifierOverlay } from "./magnifier";
+export {
+  MagnifierOverlay,
+  type MagnifierDimension,
+  type MagnifierOptions,
+} from "./magnifier";
 export { FoldablePanelOverlay } from "./foldable-panel";

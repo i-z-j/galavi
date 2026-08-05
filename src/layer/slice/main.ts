@@ -18,6 +18,7 @@ import type {
 import {
   optArray,
   optAxis,
+  optBoolean,
   optNumber,
   optNumberRecord,
   optVec2,
@@ -164,6 +165,8 @@ export class SliceLayer extends TiledImageLayer {
         contrastRange : optVec2(opts.contrastRange),
         sliceIndex    : optNumber(opts.sliceIndex),
         maxPoolSize   : optNumber(opts.maxPoolSize),
+        region        : opts.region,
+        finestLevel   : optBoolean(opts.finestLevel),
       },
     );
   }

@@ -90,7 +90,9 @@ describe("Data.source descriptor resolution", () => {
       tileBudget         : 64,
     });
     expect(frame).not.toBeNull();
-    await expect(frame!.loader.fetch(frame!.plan.tiles[0])).resolves.toBeInstanceOf(ArrayBuffer);
+    await expect(
+      frame!.loader.fetch(frame!.plan.tiles[0], new AbortController().signal),
+    ).resolves.toBeInstanceOf(ArrayBuffer);
 
     // Resolved artifacts are reachable for apps, but never enter the source.
     expect(layer.getResolvedSource()?.pyramid).toBe(PYRAMID);

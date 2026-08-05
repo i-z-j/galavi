@@ -62,6 +62,8 @@ export interface TileViewport {
 
 /** Region stride: 20 floats = 80 bytes per slot */
 const REGION_STRIDE = 80;
+/** Two u32 slot references (current + fallback) per spatial grid cell. */
+const INDEX_ENTRY_STRIDE = 2 * Uint32Array.BYTES_PER_ELEMENT;
 
 /**
  * Unified 3D tile pool. Manages a pre-allocated 3D texture where each
@@ -71,10 +73,11 @@ const REGION_STRIDE = 80;
  */
 export class TilePool {
   readonly texture      : GPUTexture;
-  readonly indexBuffer  : GPUBuffer;
   readonly readyBuffer  : GPUBuffer;
   readonly regionBuffer : GPUBuffer;
 
+  private _indexBuffer : GPUBuffer;
+  private indexCapacity: number;
   private nextSlot    = 1; // slot 0 = placeholder
   private tileMap     = new Map<string, number>();
   private slotToTile  = new Map<number, string>();
@@ -86,6 +89,7 @@ export class TilePool {
   private readonly bytesPerTexel  : number;
   readonly slotSize               : Vec3;
   private readonly poolLayout     : Vec3;
+  private readonly label          : string;
 
   constructor(config: TilePoolConfig) {
     this.device         = config.device;
@@ -94,6 +98,7 @@ export class TilePool {
     this.bytesPerTexel  = config.bytesPerTexel ?? 2;
 
     const label       = config.label ?? "TilePool";
+    this.label        = label;
     const maxTexSize  = config.device.limits.maxTextureDimension3D;
     const capX = Math.floor(maxTexSize / this.slotSize[0]);
     const capY = Math.floor(maxTexSize / this.slotSize[1]);
@@ -159,9 +164,10 @@ export class TilePool {
       usage     : GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     });
 
-    this.indexBuffer = config.device.createBuffer({
+    this.indexCapacity = this.poolSize;
+    this._indexBuffer = config.device.createBuffer({
       label : `${label} Index Buffer`,
-      size  : Math.max(this.poolSize * 2 * 4, 8),
+      size  : Math.max(this.indexCapacity * INDEX_ENTRY_STRIDE, INDEX_ENTRY_STRIDE),
       usage : GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
 
@@ -213,6 +219,37 @@ export class TilePool {
   }
 
   get capacity(): number { return this.poolSize; }
+  get indexBuffer(): GPUBuffer { return this._indexBuffer; }
+
+  /** Ensure the spatial grid can address every planned cell, resident or not. */
+  ensureIndexCapacity(entryCount: number): boolean {
+    if (entryCount <= this.indexCapacity) return false;
+
+    const maxBytes = Math.min(
+      this.device.limits.maxStorageBufferBindingSize,
+      this.device.limits.maxBufferSize,
+    );
+    const maxEntries = Math.floor(maxBytes / INDEX_ENTRY_STRIDE);
+    if (entryCount > maxEntries) {
+      throw new Error(
+        `Tile index grid requires ${entryCount} entries, exceeding the WebGPU limit of ${maxEntries}`,
+      );
+    }
+
+    const nextCapacity = Math.min(
+      maxEntries,
+      Math.max(entryCount, this.indexCapacity * 2),
+    );
+    const previous = this._indexBuffer;
+    this._indexBuffer = this.device.createBuffer({
+      label : `${this.label} Index Buffer`,
+      size  : nextCapacity * INDEX_ENTRY_STRIDE,
+      usage : GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    this.indexCapacity = nextCapacity;
+    void this.device.queue.onSubmittedWorkDone().then(() => previous.destroy());
+    return true;
+  }
 
   getSlot(tileId: string): number | undefined {
     return this.tileMap.get(tileId);
@@ -314,7 +351,7 @@ export class TilePool {
 
   destroy(): void {
     this.texture.destroy();
-    this.indexBuffer.destroy();
+    this._indexBuffer.destroy();
     this.readyBuffer.destroy();
     this.regionBuffer.destroy();
     this.tileMap.clear();

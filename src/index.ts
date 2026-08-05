@@ -62,6 +62,8 @@ export {
   RulerOverlay,
   RoiSelectorOverlay,
   MagnifierOverlay,
+  type MagnifierDimension,
+  type MagnifierOptions,
   FoldablePanelOverlay,
   type RoiBox,
   type RoiChangeKind,

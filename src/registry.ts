@@ -156,7 +156,7 @@ const getControlClasses = (): readonly ControlClass[] => [
   OrbitControl, FlyControl, PanZoomControl,
 ];
 const getOverlayClasses = (): readonly OverlayClass[] => [
-  CrosshairOverlay, RulerOverlay, RoiSelectorOverlay, MagnifierOverlay, FoldablePanelOverlay,
+  CrosshairOverlay, RulerOverlay, RoiSelectorOverlay, FoldablePanelOverlay,
 ];
 const getViewClasses    = (): readonly ViewClass[]    => [
   VolumeView, SliceView, NavigatorView,
@@ -168,9 +168,12 @@ export const layerRegistry   = new Registry<BaseLayer, LayerFactory>(() =>
 export const controlRegistry = new Registry<BaseControl, ControlFactory>(() =>
   fromClasses<ControlFactory>(getControlClasses(), "controlType", (cls) => cls.create.bind(cls)),
 );
-export const overlayRegistry = new Registry<BaseOverlay, OverlayFactory>(() =>
-  fromClasses<OverlayFactory>(getOverlayClasses(), "overlayType", (cls) => () => new cls()),
-);
+export const overlayRegistry = new Registry<BaseOverlay, OverlayFactory>(() => ({
+  ...fromClasses<OverlayFactory>(getOverlayClasses(), "overlayType", (cls) => () => new cls()),
+  // Separate tool entries over one implementation parameterized by dimension.
+  "magnifier-2d" : () => new MagnifierOverlay("2d"),
+  "magnifier-3d" : () => new MagnifierOverlay("3d"),
+}));
 export const viewRegistry    = new Registry<BaseView, ViewFactory>(() =>
   fromClasses<ViewFactory>(getViewClasses(), "viewType", (cls) => (id) => new cls(id)),
 );

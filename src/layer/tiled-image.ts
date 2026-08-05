@@ -15,11 +15,13 @@ import type {
   Data,
   ImagePyramid,
   ImagePyramidLevel,
+  LayerConfig,
   SourceDescriptor,
   Vec3,
 } from "../types";
 import {
   buildTileFetcher,
+  optBoolean,
   pickPyramidLevel,
   planTiles,
   sourceChanged,
@@ -44,6 +46,10 @@ export interface TiledImageOptions {
   maxPoolSize? : number;
   /** Non-spatial dimension selection, e.g. { c: 0, t: 5 }. Substituted into urlTemplate or passed to source.fetch. */
   selection?   : Record<string, number>;
+  /** Optional normalized XYZ crop. Storage requests still snap to whole chunks. */
+  region?      : { min: Vec3; max: Vec3 };
+  /** Keep the coarse-first initial frame, then always refine to level 0. */
+  finestLevel? : boolean;
 }
 
 /** Pyramid-level context handed to the per-frame planning hooks. */
@@ -64,6 +70,8 @@ export abstract class TiledImageLayer extends BaseLayer {
   protected source?      : Data;
   protected maxPoolSize? : number;
   protected selection    : Record<string, number>;
+  private region?        : { min: Vec3; max: Vec3 };
+  private finestLevel    = false;
 
   /**
    * Runtime artifacts resolved from `source.source` via `sourceRegistry`.
@@ -81,6 +89,8 @@ export abstract class TiledImageLayer extends BaseLayer {
     this.source       = config?.source;
     this.maxPoolSize  = config?.maxPoolSize;
     this.selection    = config?.selection ? { ...config.selection } : {};
+    this.region       = readRegion(config?.region);
+    this.finestLevel  = config?.finestLevel === true;
     this.currentLevel = Math.max(0, (this.source?.pyramid?.levels.length ?? 1) - 1);
     this.resolveSourceDescriptor();
   }
@@ -120,6 +130,16 @@ export abstract class TiledImageLayer extends BaseLayer {
       this.selection[key] = value;
       this.dataVersion++;
     }
+  }
+
+  protected override applyOptions(desc: LayerConfig): void {
+    super.applyOptions(desc);
+    this.region = readRegion(desc.options?.region);
+    this.finestLevel = optBoolean(desc.options?.finestLevel) ?? false;
+  }
+
+  protected getNormalizedRegion(): { min: Vec3; max: Vec3 } | undefined {
+    return this.region;
   }
 
   /** Update the data source (e.g., when channel changes) */
@@ -248,19 +268,22 @@ export abstract class TiledImageLayer extends BaseLayer {
     const pyramid = source?.pyramid;
     if (!source || !pyramid?.levels.length) return null;
 
-    const level = viewport.forcedLevel ?? pickPyramidLevel(pyramid, {
-      worldUnitsPerPixel : viewport.selectionUnitsPerPixel ?? viewport.worldUnitsPerPixel,
-      axes               : this.levelAxes,
-      currentLevel       : viewport.currentLevel,
-      bounds             : viewport.bounds,
-      tileBudget         : viewport.tileBudget,
-    });
+    const bounds = this.cropBounds(viewport.bounds);
+    const level = viewport.forcedLevel ?? (this.finestLevel
+      ? 0
+      : pickPyramidLevel(pyramid, {
+          worldUnitsPerPixel : viewport.selectionUnitsPerPixel ?? viewport.worldUnitsPerPixel,
+          axes               : this.levelAxes,
+          currentLevel       : viewport.currentLevel,
+          bounds,
+          tileBudget         : viewport.tileBudget,
+        }));
     this.currentLevel = level;
 
     const ctx  : TileLevelContext = { pyramid, level, levelInfo: pyramid.levels[level] };
     const grid = this.levelGrid(ctx);
     const plan = planTiles({
-      bounds    : viewport.bounds,
+      bounds,
       chunkSize : grid.chunkSize,
       resSize   : grid.resSize,
       gridDim   : grid.gridDim,
@@ -275,11 +298,42 @@ export abstract class TiledImageLayer extends BaseLayer {
     return {
       plan,
       loader: {
-        fetch: (req) => buildTileFetcher(source, selection)({
+        fetch: (req, signal) => buildTileFetcher(source, selection)({
           level    : req.level,
           position : this.fetchPosition(ctx, req.voxelPos),
+          signal,
         }),
       },
     };
   }
+
+  private cropBounds(bounds: TileViewport["bounds"]): TileViewport["bounds"] {
+    const region = this.region;
+    if (!region) return bounds;
+
+    const min = this.levelAxes.map((axis, index) => (
+      Math.max(bounds.min[index] ?? 0, region.min[axis])
+    ));
+    const max = this.levelAxes.map((axis, index) => (
+      Math.max(min[index], Math.min(bounds.max[index] ?? 1, region.max[axis]))
+    ));
+    return { min, max };
+  }
+}
+
+function readRegion(value: unknown): { min: Vec3; max: Vec3 } | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const candidate = value as { min?: unknown; max?: unknown };
+  if (
+    !Array.isArray(candidate.min) || candidate.min.length !== 3 ||
+    !Array.isArray(candidate.max) || candidate.max.length !== 3 ||
+    !candidate.min.every((entry) => typeof entry === "number" && Number.isFinite(entry)) ||
+    !candidate.max.every((entry) => typeof entry === "number" && Number.isFinite(entry))
+  ) return undefined;
+
+  const min = candidate.min.map((entry) => Math.max(0, Math.min(1, entry))) as Vec3;
+  const max = candidate.max.map((entry, axis) => (
+    Math.max(min[axis], Math.min(1, entry))
+  )) as Vec3;
+  return { min, max };
 }

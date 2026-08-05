@@ -18,6 +18,7 @@ import type {
 } from "../../types";
 import {
   UNIT_CUBE,
+  optBoolean,
   optNumber,
   optNumberRecord,
   optString,
@@ -161,6 +162,8 @@ export class VolumeLayer extends TiledImageLayer {
       contrastRange : optVec2(opts.contrastRange),
       selection     : optNumberRecord(opts.selection),
       maxPoolSize   : optNumber(opts.maxPoolSize),
+      region        : opts.region,
+      finestLevel   : optBoolean(opts.finestLevel),
     });
   }
 
@@ -264,6 +267,11 @@ export class VolumeLayer extends TiledImageLayer {
 
   /** World-space bounds of the unit volume cube under the current model matrix. */
   override getWorldAABB(): { min: Vec3; max: Vec3 } {
-    return transformAABB([0, 0, 0], [1, 1, 1], this.modelMatrix);
+    const region = this.getNormalizedRegion();
+    return transformAABB(
+      region?.min ?? [0, 0, 0],
+      region?.max ?? [1, 1, 1],
+      this.modelMatrix,
+    );
   }
 }
