@@ -18,6 +18,8 @@ export {
 	type Shader,
 	type LayerParams,
 	type LayerClass,
+	type LayerLoadStatus,
+	type LayerLoadState,
 	type VertexAttribute,
 } from "./base";
 

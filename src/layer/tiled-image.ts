@@ -36,15 +36,26 @@ import {
   sourceRegistry,
   type ResolvedSource,
 } from "../registry";
-import { BaseLayer } from "./base";
+import { BaseLayer, type LayerLoadStatus } from "./base";
 
 /** Options shared by every tiled image layer. */
 export interface TiledImageOptions {
   /** Data source descriptor */
   source?      : Data;
-  /** Optional tile-atlas slot cap (default: derived from a 128 MiB budget) */
+  /** Optional tile-atlas slot cap. Explicit low-level override: when set, it
+   * wins and the volume layer's automatic preview-budget policy (DX-M4) is
+   * disabled. When unset, volume layers bound pathological z-chunk=1 pyramids
+   * automatically; other layers derive the cap from a 128 MiB budget. */
   maxPoolSize? : number;
-  /** Non-spatial dimension selection, e.g. { c: 0, t: 5 }. Substituted into urlTemplate or passed to source.fetch. */
+  /**
+   * Non-spatial dimension selection, e.g. { c: 0, t: 5 }. Substituted into
+   * urlTemplate or passed to source.fetch.
+   *
+   * This is the ONLY path for non-spatial dimensions: top-level keys such as
+   * `c` / `t` / `z` directly on this options bag are never read — unknown
+   * option keys are ignored per the config-boundary policy (with a
+   * development-mode console warning naming the stray keys).
+   */
   selection?   : Record<string, number>;
   /** Optional normalized XYZ crop. Storage requests still snap to whole chunks. */
   region?      : { min: Vec3; max: Vec3 };
@@ -66,6 +77,55 @@ export interface TileLevelGrid {
   resSize   : number[];
 }
 
+// === Dev-time unknown-option-key diagnostics (DX-Q1) ===
+
+/**
+ * Option keys recognized by every tiled image layer: the TiledImageOptions
+ * bag plus the base-dispatched `timepoint` (BaseLayer.applyOptions) and
+ * `contrastRange` (BaseLayer.applyRenderConfig). Subclasses with additional
+ * option keys extend the list via {@link TiledImageLayer.knownOptionKeys}.
+ * Not part of the public API.
+ */
+export const TILED_IMAGE_OPTION_KEYS: readonly string[] = [
+  "source",
+  "maxPoolSize",
+  "selection",
+  "region",
+  "finestLevel",
+  "timepoint",
+  "contrastRange",
+];
+
+/**
+ * DEVELOPMENT-only diagnostic: unknown option keys are silently ignored by
+ * the config-boundary policy, which hid real defects (a top-level `c` never
+ * reaches the channel axis — every channel rendered channel 0). Warn, never
+ * throw; the keys stay ignored.
+ *
+ * Gating: callers wrap the call in `import.meta.env?.DEV !== false`. Vite's
+ * production build statically replaces `import.meta.env.DEV` (including the
+ * optional-chained form) with `false`, so rollup tree-shakes the guarded
+ * branch — and this then-unreferenced helper — out of dist. Everywhere else
+ * (vitest, plain node, unbundled ESM) `import.meta.env` is undefined or
+ * DEV=true, so the warning stays on unless a bundler proves production.
+ */
+function warnUnknownOptionKeys(
+  label   : string,
+  id      : string,
+  options : Record<string, unknown> | undefined,
+  known   : readonly string[],
+): void {
+  if (!options) return;
+  const unknown = Object.keys(options).filter((key) => !known.includes(key));
+  if (unknown.length === 0) return;
+  console.warn(
+    `[${label}] Layer "${id}" received unknown option key(s): ` +
+    `${unknown.map((key) => `"${key}"`).join(", ")} — ignored. ` +
+    "Non-spatial dimension selections (c, t, z, …) belong in `options.selection`, " +
+    "e.g. { selection: { c: 2 } }.",
+  );
+}
+
 export abstract class TiledImageLayer extends BaseLayer {
   protected source?      : Data;
   protected maxPoolSize? : number;
@@ -81,11 +141,24 @@ export abstract class TiledImageLayer extends BaseLayer {
   private resolvedSource? : ResolvedSource;
   /** Monotonic token invalidating superseded async resolutions. */
   private sourceEpoch     = 0;
+  /**
+   * Recorded source-resolution failure (DX-M2). Set when descriptor
+   * resolution fails, cleared when a new resolution starts. Surfaces through
+   * `loadStatus` / `loadError` and rejects `whenLayerReady` waiters.
+   */
+  private sourceError?    : Error;
 
   private currentLevel : number;
 
   constructor(id?: string, config?: TiledImageOptions) {
     super(id);
+    if (import.meta.env?.DEV !== false) {
+      warnUnknownOptionKeys(
+        this.tileLabel, this.id,
+        config as Record<string, unknown> | undefined,
+        this.knownOptionKeys,
+      );
+    }
     this.source       = config?.source;
     this.maxPoolSize  = config?.maxPoolSize;
     this.selection    = config?.selection ? { ...config.selection } : {};
@@ -97,8 +170,15 @@ export abstract class TiledImageLayer extends BaseLayer {
 
   // === Dimensional hooks (the real 2D/3D differences) ===
 
-  /** Debug label prefix for the tile pool (e.g. "VolumeLayer"). */
-  protected abstract get tileLabel(): string;
+  /** Debug label prefix for the tile pool and diagnostics (e.g. "VolumeLayer"). */
+  protected get tileLabel(): string { return "TiledImageLayer"; }
+  /**
+   * Option keys this layer recognizes, for the dev-only unknown-key warning.
+   * Subclasses with extra option keys override and extend the base list.
+   */
+  protected get knownOptionKeys(): readonly string[] {
+    return TILED_IMAGE_OPTION_KEYS;
+  }
   /** World axes used for automatic level selection ([0,1,2] volume, [u,v] slice). */
   protected abstract get levelAxes(): readonly AxisIndex[];
   /** Tile-atlas slot size: max chunk extents across levels, in rendered axes. */
@@ -133,8 +213,18 @@ export abstract class TiledImageLayer extends BaseLayer {
   }
 
   protected override applyOptions(desc: LayerConfig): void {
+    if (import.meta.env?.DEV !== false) {
+      warnUnknownOptionKeys(this.tileLabel, this.id, desc.options, this.knownOptionKeys);
+    }
     super.applyOptions(desc);
-    this.region = readRegion(desc.options?.region);
+    const region = readRegion(desc.options?.region);
+    if (!sameRegion(this.region, region)) {
+      this.region = region;
+      // The volume preview policy keys off the region (VolumeLayer), and the
+      // effective source is memoized per (source, resolvedSource) pair — drop
+      // the memo so the policy re-evaluates against the new region.
+      this.effectiveSourceCache = undefined;
+    }
     this.finestLevel = optBoolean(desc.options?.finestLevel) ?? false;
   }
 
@@ -155,16 +245,41 @@ export abstract class TiledImageLayer extends BaseLayer {
   /**
    * The config source overlaid with descriptor-resolved runtime artifacts.
    * Explicit `pyramid`/`fetch` in the config always win over resolved ones.
+   * The merged source then passes through {@link applyEffectiveSourcePolicy}
+   * (identity by default); the result is memoized on the inputs so per-frame
+   * readers do not re-derive it.
    */
+  private effectiveSourceCache?: {
+    source   : Data | undefined;
+    resolved : ResolvedSource | undefined;
+    value    : Data | undefined;
+  };
+
   protected get effectiveSource(): Data | undefined {
     const source   = this.source;
     const resolved = this.resolvedSource;
-    if (!source || !resolved) return source;
-    return {
+    const cache = this.effectiveSourceCache;
+    if (cache && cache.source === source && cache.resolved === resolved) {
+      return cache.value;
+    }
+    const merged: Data | undefined = (!source || !resolved) ? source : {
       ...source,
       pyramid : source.pyramid ?? resolved.pyramid,
       fetch   : source.fetch   ?? resolved.fetch,
     };
+    const value = this.applyEffectiveSourcePolicy(merged);
+    this.effectiveSourceCache = { source, resolved, value };
+    return value;
+  }
+
+  /**
+   * Policy hook over the merged effective source — subclasses may substitute
+   * a bounded pyramid/fetch pair (e.g. VolumeLayer's automatic preview
+   * budgets for pathological z-chunk=1 pyramids, DX-M4). Identity by default.
+   * Must be pure: the result is cached per (source, resolvedSource) pair.
+   */
+  protected applyEffectiveSourcePolicy(source: Data | undefined): Data | undefined {
+    return source;
   }
 
   /** Runtime artifacts produced by the last successful descriptor resolution. */
@@ -184,17 +299,41 @@ export abstract class TiledImageLayer extends BaseLayer {
   }
 
   /**
+   * Load state for descriptor-backed sources (DX-M2): `"error"` once a
+   * resolution failure is recorded, `"idle"` when no source is set,
+   * `"loading"` while a descriptor resolution is in flight, `"ready"`
+   * otherwise. (`isReady` stays `true` for source-less layers to match the
+   * pre-descriptor behavior; `loadStatus` is the finer-grained query.)
+   */
+  override get loadStatus(): LayerLoadStatus {
+    if (this.sourceError) return "error";
+    const source = this.source;
+    if (!source) return "idle";
+    if (!source.source || source.pyramid || source.fetch) return "ready";
+    return this.resolvedSource !== undefined ? "ready" : "loading";
+  }
+
+  /** The recorded source-resolution failure, when `loadStatus` is `"error"`. */
+  override get loadError(): Error | undefined {
+    return this.sourceError;
+  }
+
+  /**
    * Kick off asynchronous resolution of `source.source` (if any) through
    * `sourceRegistry`. Explicit `pyramid`/`fetch` take precedence — the
    * descriptor is ignored while either is present.
    *
-   * Failure semantics: the error is logged via `console.error` with the
-   * descriptor and the layer stays not-ready; the Galavi instance and other
-   * layers are unaffected.
+   * Failure semantics (DX-M2): the error is logged via `console.error` with
+   * the descriptor, recorded on the layer (`loadStatus` → `"error"`,
+   * `loadError`), and signaled through the render-request channel so pending
+   * and later `whenLayerReady` calls reject with it. The Galavi instance and
+   * other layers are unaffected; setting a new source clears the recorded
+   * error and retries.
    */
   private resolveSourceDescriptor(): void {
     this.sourceEpoch++;
     this.resolvedSource = undefined;
+    this.sourceError    = undefined;
 
     const source = this.source;
     const desc   = source?.source;
@@ -205,8 +344,10 @@ export abstract class TiledImageLayer extends BaseLayer {
     try {
       pending = sourceRegistry.create(desc.type, desc);
     } catch (err) {
-      // Unknown source type — `create` throws synchronously.
-      this.logSourceError(err, desc);
+      // Unknown source type — `create` throws synchronously. Record an
+      // actionable error naming the registered types (mirroring openDataset's
+      // unknown-type rejection) with the registry's error as `cause`.
+      this.failSourceResolution(this.unknownSourceTypeError(err, desc), err, desc);
       return;
     }
 
@@ -226,13 +367,39 @@ export abstract class TiledImageLayer extends BaseLayer {
       this.requestRender();
     }).catch((err) => {
       if (epoch !== this.sourceEpoch) return;
-      this.logSourceError(err, desc);
+      // Factory rejections are recorded as-is (never wrapped): adapters
+      // already reject with actionable, `cause`-chained errors — matching
+      // openDataset's "resolver errors reject as-is" policy — so the same
+      // failure surfaces identically on the per-layer path.
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.failSourceResolution(error, err, desc);
     });
+  }
+
+  /**
+   * Record a source-resolution failure, log it, and signal the view so
+   * pending `whenLayerReady` waiters reject. The signal is a no-op when the
+   * layer is not attached to a view yet — the recorded status stays
+   * queryable, and `whenLayerReady` checks it up front.
+   */
+  private failSourceResolution(recorded: Error, logged: unknown, desc: SourceDescriptor): void {
+    this.sourceError = recorded;
+    this.logSourceError(logged, desc);
+    this.requestRender();
+  }
+
+  private unknownSourceTypeError(cause: unknown, desc: SourceDescriptor): Error {
+    const registered = sourceRegistry.keys().join(", ") || "none";
+    return new Error(
+      `Unknown source type: "${desc.type}" for layer "${this.id}" (registered: ${registered}). ` +
+      "Register a source factory first — e.g. registerOMEZarrSource() from @galavi/ome-zarr-adapter.",
+      { cause },
+    );
   }
 
   private logSourceError(err: unknown, desc: SourceDescriptor): void {
     console.error(
-      `[${this.tileLabel}] Failed to resolve source for layer "${this.id}" — layer stays not-ready:`,
+      `[${this.tileLabel}] Failed to resolve source for layer "${this.id}" — load status is now "error":`,
       err,
       desc,
     );
@@ -336,4 +503,14 @@ function readRegion(value: unknown): { min: Vec3; max: Vec3 } | undefined {
     Math.max(min[axis], Math.min(1, entry))
   )) as Vec3;
   return { min, max };
+}
+
+function sameRegion(
+  first?: { min: Vec3; max: Vec3 },
+  second?: { min: Vec3; max: Vec3 },
+): boolean {
+  if (first === second) return true;
+  if (!first || !second) return false;
+  return first.min.every((v, i) => v === second.min[i]) &&
+    first.max.every((v, i) => v === second.max[i]);
 }

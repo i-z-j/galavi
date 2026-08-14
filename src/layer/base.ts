@@ -30,6 +30,30 @@ interface Transform {
 /** Blending mode for layer compositing */
 type BlendingMode = NonNullable<Render['blending']>;
 
+// === Load status (DX-M2) ===
+
+/**
+ * Coarse load state of a layer's data:
+ * - `"idle"`    — nothing to load (no source set).
+ * - `"loading"` — asynchronous work in flight (e.g. source-descriptor
+ *   resolution, async data init).
+ * - `"ready"`   — data is renderable (`isReady` holds).
+ * - `"error"`   — a failure was recorded; see {@link BaseLayer.loadError}.
+ *
+ * `BaseLayer`'s default derives from `isReady`; layers with a failable async
+ * source (tiled image layers) override to also report `"idle"` / `"error"`.
+ */
+export type LayerLoadStatus = "idle" | "loading" | "ready" | "error";
+
+/**
+ * Snapshot of a layer's load state (DX-M2), with the recorded error when
+ * `status` is `"error"`. Returned by `BaseView.getLayerStatus`.
+ */
+export interface LayerLoadState {
+  status : LayerLoadStatus;
+  error? : Error;
+}
+
 /** Vertex attribute definition */
 export interface VertexAttribute {
   shaderLocation  : number;
@@ -289,6 +313,26 @@ export abstract class BaseLayer {
   /** Whether data is ready for rendering */
   get isReady(): boolean {
     return true;
+  }
+
+  /**
+   * Coarse load state (DX-M2) — see {@link LayerLoadStatus}. The default
+   * derives from `isReady`; layers with a failable async source (tiled image
+   * layers) override to report `"idle"` / `"error"`.
+   */
+  get loadStatus(): LayerLoadStatus {
+    return this.isReady ? "ready" : "loading";
+  }
+
+  /**
+   * The recorded load failure when `loadStatus` is `"error"`, else
+   * `undefined`. The original rejection is preserved (adapters wrap their
+   * open failures with context and a `cause` chain), so apps can distinguish
+   * an unknown source type from unsupported metadata and network/CORS
+   * failures.
+   */
+  get loadError(): Error | undefined {
+    return undefined;
   }
 
   /**

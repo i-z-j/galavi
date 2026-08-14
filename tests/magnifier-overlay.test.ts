@@ -133,6 +133,13 @@ describe("MagnifierOverlay", () => {
     return overlay;
   }
 
+  /** The 3D variant mounts its root on the document body (stacking escape). */
+  function mountedRoot(dimension: "2d" | "3d"): HTMLDivElement {
+    return (dimension === "3d"
+      ? document.body.lastElementChild
+      : host.children[1]) as HTMLDivElement;
+  }
+
   it("registers only the two explicit variants", () => {
     expect((overlayRegistry.create("magnifier-2d") as any).dimension).toBe("2d");
     expect((overlayRegistry.create("magnifier-3d") as any).dimension).toBe("3d");
@@ -223,7 +230,7 @@ describe("MagnifierOverlay", () => {
         max: [216 / 400, 166 / 300, 66 / 100],
       },
     });
-    expect(wrapped.render).toMatchObject({ mode: "mip", contrastLimits: [0.1, 0.6] });
+    expect(wrapped.render).toMatchObject({ volumeProjection: "mip", contrastLimits: [0.1, 0.6] });
     overlay.unmount();
   });
 
@@ -236,7 +243,7 @@ describe("MagnifierOverlay", () => {
 
     overlay.render(state);
 
-    const readout = (host.children[1] as HTMLDivElement).querySelector<HTMLElement>('[data-magnifier-size]')!;
+    const readout = mountedRoot("3d").querySelector<HTMLElement>('[data-magnifier-size]')!;
     expect(readout.textContent).toBe("16 vx");
     expect(nested.getState().layers[0].options).toMatchObject({
       region: {
@@ -253,7 +260,7 @@ describe("MagnifierOverlay", () => {
     const nested = fakeNested(state, { level: 1, targetLevel: 0, refining: true });
     Object.assign(overlay, { nested: nested.instance, mountedLayerIds: state.layers.map((layer) => layer.id) });
     overlay.render(state);
-    const root = host.children[1] as HTMLDivElement;
+    const root = mountedRoot("3d");
     const decrement = root.querySelector<HTMLButtonElement>('[aria-label="Decrease 3D block size"]')!;
     const increment = root.querySelector<HTMLButtonElement>('[aria-label="Increase 3D block size"]')!;
     const readout = root.querySelector<HTMLElement>('[data-magnifier-size]')!;
@@ -309,7 +316,7 @@ describe("MagnifierOverlay", () => {
     overlay.render(state);
     (overlay as any).rebuildChannelPanel(state, (overlay as any).prepare3d(state));
 
-    const root = host.children[1] as HTMLDivElement;
+    const root = mountedRoot("3d");
     const channels = root.querySelectorAll<HTMLElement>('[data-magnifier-channel]');
     const sliders = root.querySelectorAll<HTMLElement>('.range-slider');
     const thumbs = root.querySelectorAll<HTMLButtonElement>('.range-thumb');
@@ -337,7 +344,7 @@ describe("MagnifierOverlay", () => {
     Object.assign(overlay, { nested: nested.instance, mountedLayerIds: state.layers.map((layer) => layer.id) });
     overlay.render(state);
     (overlay as any).rebuildChannelPanel(state, (overlay as any).prepare3d(state));
-    const root = host.children[1] as HTMLDivElement;
+    const root = mountedRoot("3d");
     const tab = root.querySelector<HTMLButtonElement>('[aria-label="Collapse channels"]')!;
     const panel = root.querySelector<HTMLElement>('[data-magnifier-channel-panel]')!;
 
@@ -358,7 +365,7 @@ describe("MagnifierOverlay", () => {
     const nested = fakeNested(state, { level: 1, targetLevel: 0, refining: true });
     Object.assign(overlay, { nested: nested.instance, mountedLayerIds: state.layers.map((layer) => layer.id) });
     overlay.render(state);
-    const loading = (host.children[1] as HTMLDivElement).querySelector<HTMLElement>('[role="status"]')!;
+    const loading = mountedRoot("3d").querySelector<HTMLElement>('[role="status"]')!;
     expect(loading.style.display).toBe("block");
     overlay.unmount();
   });
@@ -385,6 +392,34 @@ describe("MagnifierOverlay", () => {
     expect((overlay as any).spinPaused).toBe(false);
     expect(requestFrame).toHaveBeenCalled();
     overlay.unmount();
+  });
+
+  it("applies the base zIndex option to the overlay root (default 10)", () => {
+    const overlay = mount("3d");
+    const root = mountedRoot("3d");
+    expect(root.style.zIndex).toBe("10");
+
+    // App chrome floating above the viewer (e.g. z-index 20 HUD panels) would
+    // otherwise event-occlude the magnifier's interactive channel panel.
+    overlay.setOptions({ zIndex: 40 });
+    expect(root.style.zIndex).toBe("40");
+    overlay.unmount();
+
+    // A value set before mount survives the mount.
+    const early = new MagnifierOverlay("3d");
+    early.bindView({
+      getViewType: () => "slice",
+      getLayerIds: () => [],
+      getCanvas: () => canvas,
+      isActive: () => true,
+      getAxisMap: () => [0, 1, 2] as const,
+      getTheme: () => FUI_THEME,
+      getOwner: () => undefined,
+    });
+    early.setOptions({ zIndex: 40 });
+    early.mount(host);
+    expect((document.body.lastElementChild as HTMLDivElement).style.zIndex).toBe("40");
+    early.unmount();
   });
 
   it("destroys nested rendering and clears the pin when disabled", () => {

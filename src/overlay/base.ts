@@ -62,6 +62,7 @@ export abstract class BaseOverlay {
   private binding?          : OverlayBinding;
   private visible           = true;
   private visibleWhenActive = false;
+  private zIndex            = 10;
 
   private themePartial?  : DeepPartial<GalaviTheme>;
   private resolvedTheme  : GalaviTheme = DEFAULT_THEME;
@@ -77,13 +78,18 @@ export abstract class BaseOverlay {
     const root = document.createElement("div");
     root.style.position       = "absolute";
     root.style.pointerEvents  = "none";
-    root.style.zIndex         = "10";
+    root.style.zIndex         = `${this.zIndex}`;
     root.style.display        = "none";
 
     // Anchor the absolutely-positioned overlay root: only force `relative`
     // on statically-positioned hosts — never clobber a stylesheet position
-    // (e.g. an `absolute` overlay frame), which would drop it in-flow.
-    if (getComputedStyle(parent).position === "static") parent.style.position = "relative";
+    // (e.g. an `absolute` overlay frame), which would drop it in-flow. The
+    // document body is never forced: overlays mounted there use fixed
+    // positioning (stacking-context escape), and forcing `relative` on body
+    // would disturb the host page's layout.
+    if (parent !== parent.ownerDocument.body && getComputedStyle(parent).position === "static") {
+      parent.style.position = "relative";
+    }
     parent.appendChild(root);
 
     this.root   = root;
@@ -119,13 +125,19 @@ export abstract class BaseOverlay {
    * Update view-local presentation options at runtime. Options not understood
    * by the base overlay are forwarded to `onOptionsChanged` for subclasses.
    *
-   * Base options: `visible`, `visibleWhenActive`, and `theme` (a
+   * Base options: `visible`, `visibleWhenActive`, `zIndex` (stacking order of
+   * the overlay root — raise it when app chrome floats above the viewer and
+   * would occlude interactive overlay UI), and `theme` (a
    * `DeepPartial<GalaviTheme>` merged over the global galavi theme).
    */
   setOptions(opts?: Record<string, unknown>): void {
     if (opts) {
       if (typeof opts.visible === "boolean") this.visible = opts.visible;
       if (typeof opts.visibleWhenActive === "boolean") this.visibleWhenActive = opts.visibleWhenActive;
+      if (typeof opts.zIndex === "number" && Number.isFinite(opts.zIndex)) {
+        this.zIndex = Math.max(0, Math.trunc(opts.zIndex));
+        if (this.root) this.root.style.zIndex = `${this.zIndex}`;
+      }
       if (opts.theme && typeof opts.theme === "object") {
         this.themePartial = opts.theme as DeepPartial<GalaviTheme>;
         this.updateTheme();

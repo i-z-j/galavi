@@ -1,10 +1,10 @@
 /**
  * Volume render-mode tests (mip / minip / mean).
  *
- * `render.mode` is parsed per the config-boundary policy (wrong-typed or
- * unknown values fall back to "mip"), packed into the params uniform at
- * slot 31, and switched at runtime via `setRender` — a params-only update
- * that never touches geometryVersion (no pipeline rebuild).
+ * `render.volumeProjection` is parsed per the config-boundary policy
+ * (wrong-typed or unknown values fall back to "mip"), packed into the params
+ * uniform at slot 31, and switched at runtime via `setRender` — a params-only
+ * update that never touches geometryVersion (no pipeline rebuild).
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { createGalavi, type Galavi } from "../src/index";
@@ -19,11 +19,11 @@ function paramsMode(layer: VolumeLayer): number {
   return layer.getParams().toBuffer()[31];
 }
 
-function applyRenderMode(layer: VolumeLayer, mode: unknown): void {
+function applyRenderMode(layer: VolumeLayer, volumeProjection: unknown): void {
   layer.applyConfig({
     id     : layer.id,
     type   : "volume",
-    render : { mode } as LayerConfig["render"],
+    render : { volumeProjection } as LayerConfig["render"],
   });
 }
 
@@ -61,7 +61,7 @@ describe("volume render mode", () => {
     expect(params.toBuffer()[31]).toBe(0);
   });
 
-  test("applyConfig parses render.mode into the params (valid + default)", () => {
+  test("applyConfig parses render.volumeProjection into the params (valid + default)", () => {
     const layer = VolumeLayer.fromConfig("v", { id: "v", type: "volume" });
     expect(paramsMode(layer)).toBe(0); // default before any config
 
@@ -83,6 +83,16 @@ describe("volume render mode", () => {
     expect(paramsMode(layer)).toBe(0);
   });
 
+  test("the old render.mode key is ignored (no compatibility alias)", () => {
+    const layer = VolumeLayer.fromConfig("v", { id: "v", type: "volume" });
+    layer.applyConfig({
+      id     : "v",
+      type   : "volume",
+      render : { mode: "minip" } as unknown as LayerConfig["render"],
+    });
+    expect(paramsMode(layer)).toBe(0); // falls back to the default mip
+  });
+
   test("mode change is params-only: no pipeline rebuild, no data invalidation", () => {
     const layer = VolumeLayer.fromConfig("v", { id: "v", type: "volume" });
     const geometryVersion = layer.geometryVersion;
@@ -94,7 +104,7 @@ describe("volume render mode", () => {
   });
 });
 
-describe("setRender({ mode }) through a Galavi instance", () => {
+describe("setRender({ volumeProjection }) through a Galavi instance", () => {
   let galavi: Galavi | undefined;
 
   beforeEach(() => {
@@ -124,8 +134,8 @@ describe("setRender({ mode }) through a Galavi instance", () => {
       views: { main: { type: "volume", layers: ["v"] } },
     });
 
-    galavi.layer("v")!.setRender({ mode: "minip" });
-    expect(galavi.layer("v")!.config.render?.mode).toBe("minip");
+    galavi.layer("v")!.setRender({ volumeProjection: "minip" });
+    expect(galavi.layer("v")!.config.render?.volumeProjection).toBe("minip");
 
     // The state entry feeds the layer through the standard applyConfig path.
     const desc = galavi.getState().layers.find((l) => l.id === "v")!;
@@ -133,7 +143,7 @@ describe("setRender({ mode }) through a Galavi instance", () => {
     layer.applyConfig(desc);
     expect(paramsMode(layer)).toBe(1);
 
-    galavi.layer("v")!.setRender({ mode: "mean" });
+    galavi.layer("v")!.setRender({ volumeProjection: "mean" });
     layer.applyConfig(galavi.getState().layers.find((l) => l.id === "v")!);
     expect(paramsMode(layer)).toBe(2);
     expect(layer.geometryVersion).toBe(0);

@@ -390,6 +390,26 @@ export class MagnifierOverlay extends BaseOverlay {
 
   protected override configureRoot(root: HTMLDivElement): void {
     root.style.overflow = "hidden";
+    if (this.dimension === "3d") {
+      // The 3D root is mounted on the document body and tracks the canvas in
+      // fixed viewport coordinates (see `mount`): an ancestor with its own
+      // stacking context (clip-path, transform, …) or floating app chrome
+      // above the viewer must not clip or event-occlude the interactive
+      // channel panel, size control, or orbit inset.
+      root.style.position = "fixed";
+    }
+  }
+
+  /**
+   * The 3D variant mounts into the document body instead of the canvas host:
+   * its interactive chrome (channel panel, size control, orbit inset) must
+   * stack above app-level floating UI (HUD panels at higher z-index) and must
+   * not be trapped by a stacking-context ancestor of the canvas (clip-path,
+   * transform, filter). `alignRootToCanvas` pins the root over the canvas in
+   * fixed coordinates on every render. The 2D variant stays canvas-local.
+   */
+  override mount(parent: HTMLElement): void {
+    super.mount(this.dimension === "3d" ? parent.ownerDocument.body : parent);
   }
 
   protected override onMount(root: HTMLDivElement): void {
@@ -708,7 +728,7 @@ export class MagnifierOverlay extends BaseOverlay {
         },
         render: {
           ...(desc.render ?? {}),
-          mode: "mip",
+          volumeProjection: "mip",
           visible: setting.visible,
           contrastLimits: [...setting.contrast],
           color: setting.color,
@@ -1355,13 +1375,20 @@ export class MagnifierOverlay extends BaseOverlay {
 
   private alignRootToCanvas(canvas: HTMLCanvasElement, width: number, height: number): void {
     if (!this.root) return;
-    const hostRect = this.getHostElement()?.getBoundingClientRect();
     const canvasRect = canvas.getBoundingClientRect();
     const hasLayout = canvasRect.width > 0 || canvasRect.height > 0;
-    const left = hostRect && hasLayout ? canvasRect.left - hostRect.left : canvas.offsetLeft;
-    const top = hostRect && hasLayout ? canvasRect.top - hostRect.top : canvas.offsetTop;
-    this.root.style.left = `${left}px`;
-    this.root.style.top = `${top}px`;
+    if (this.dimension === "3d") {
+      // Fixed, body-mounted root: pin directly over the canvas in viewport
+      // coordinates (recomputed every render, so scroll/resize track).
+      this.root.style.left = `${hasLayout ? canvasRect.left : canvas.offsetLeft}px`;
+      this.root.style.top = `${hasLayout ? canvasRect.top : canvas.offsetTop}px`;
+    } else {
+      const hostRect = this.getHostElement()?.getBoundingClientRect();
+      const left = hostRect && hasLayout ? canvasRect.left - hostRect.left : canvas.offsetLeft;
+      const top = hostRect && hasLayout ? canvasRect.top - hostRect.top : canvas.offsetTop;
+      this.root.style.left = `${left}px`;
+      this.root.style.top = `${top}px`;
+    }
     this.root.style.width = `${width}px`;
     this.root.style.height = `${height}px`;
   }

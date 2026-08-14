@@ -9,6 +9,7 @@
  *   - pool.ts     — TilePool, TilePoolConfig, TileSpec, TileViewport, tileId
  *   - planner.ts  — planTiles, TilePlacement, TilePlan
  *   - manager.ts  — TileManager, TileLoader, TileFramePlan
+ *   - volume-policy.ts — planVolumePreview (automatic volume tile budgets)
  *   - float16.ts  — floatToFloat16
  *   - pack.ts     — dtypeNormalization, makeFloat16Encoder
  */
@@ -52,6 +53,15 @@ export {
 } from "./manager";
 
 export { floatToFloat16 } from "./float16";
+
+export {
+  planVolumePreview,
+  VOLUME_PREVIEW_MAX_SLABS,
+  VOLUME_PREVIEW_MAX_TILES,
+  VOLUME_PREVIEW_MAX_CHUNK_TEXELS,
+  VOLUME_PREVIEW_POOL_HEADROOM,
+  type VolumePreviewPlan,
+} from "./volume-policy";
 
 export {
   dtypeNormalization,

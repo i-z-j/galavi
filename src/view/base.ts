@@ -30,7 +30,7 @@ import { DEPTH_FORMAT } from "../defaults";
 import type { BaseControl } from "../control";
 import { BaseOverlay } from "../overlay";
 import { DEFAULT_THEME } from "../overlay/theme";
-import { BaseLayer } from "../layer";
+import { BaseLayer, type LayerLoadState } from "../layer";
 import type { ImagePipeline } from "./runtime";
 
 // ============================================================================
@@ -325,11 +325,26 @@ export abstract class BaseView {
    *   simply continues until the layer becomes ready for the new data.
    * - A settled promise is unaffected by later source reloads; callers that
    *   change a layer's source should call `whenLayerReady` again.
+   * - Rejects with the layer's recorded load error when its source fails
+   *   (DX-M2 — e.g. unknown source type, unsupported metadata, network/CORS
+   *   failure): pending waiters reject when the failure is signaled, and
+   *   calls made while `loadStatus` is `"error"` reject immediately.
    * - Rejects with `signal.reason` when the passed AbortSignal aborts, when
    *   the layer is removed from the view, or when the view is destroyed.
+   *
+   * Abort/failure precedence: an abort settles only its own waiter — an
+   * aborted waiter is removed, so a later failure cannot reject it (abort
+   * wins over a late failure). A call made with an already-aborted signal
+   * rejects with the abort reason even when the layer is already in error
+   * (the abort check runs first).
    */
   whenLayerReady(layer: BaseLayer, signal?: AbortSignal): Promise<BaseLayer> {
     if (signal?.aborted) return Promise.reject(signal.reason as unknown);
+    if (layer.loadStatus === "error") {
+      return Promise.reject(
+        layer.loadError ?? new Error(`Layer "${layer.id}" failed to load`),
+      );
+    }
     if (layer.isReady) return Promise.resolve(layer);
     return new Promise((resolve, reject) => {
       const waiter = { resolve, reject };
@@ -346,10 +361,20 @@ export abstract class BaseView {
     });
   }
 
-  /** Resolve pending readiness waiters after a layer signal, if it is ready. */
+  /**
+   * Settle pending readiness waiters after a layer signal: resolve when the
+   * layer is ready, reject with the recorded load error when it failed.
+   */
   private notifyLayerSignal(layer: BaseLayer): void {
     const waiters = this.readinessWaiters.get(layer);
-    if (!waiters || !layer.isReady) return;
+    if (!waiters) return;
+    if (layer.loadStatus === "error") {
+      this.readinessWaiters.delete(layer);
+      const err = layer.loadError ?? new Error(`Layer "${layer.id}" failed to load`);
+      for (const waiter of waiters) waiter.reject(err);
+      return;
+    }
+    if (!layer.isReady) return;
     this.readinessWaiters.delete(layer);
     for (const waiter of waiters) waiter.resolve(layer);
   }
@@ -441,6 +466,19 @@ export abstract class BaseView {
   /** View-local pyramid level selected for a tiled layer, if available. */
   getCurrentLevel(layerId: ID): number | undefined {
     return this.pipeline?.getCurrentLevel(layerId);
+  }
+
+  /**
+   * Snapshot of a layer's load state (DX-M2): `idle` / `loading` / `ready` /
+   * `error`, with the recorded error when failed. Poll-based counterpart of
+   * `whenLayerReady` — no subscription needed. Returns `undefined` for
+   * unknown layer IDs.
+   */
+  getLayerStatus(layerId: ID): LayerLoadState | undefined {
+    const layer = this.layerEntries.find((entry) => entry.id === layerId);
+    if (!layer) return undefined;
+    const status = layer.loadStatus;
+    return status === "error" ? { status, error: layer.loadError } : { status };
   }
 
   /** View-local image resolution for a tiled layer, if available. */

@@ -25,3 +25,12 @@ export {
   type MagnifierOptions,
 } from "./magnifier";
 export { FoldablePanelOverlay } from "./foldable-panel";
+export {
+  type BaseOverlayOptions,
+  type CrosshairOverlayOptions,
+  type RulerOverlayOptions,
+  type RoiSelectorOverlayOptions,
+  type FoldablePanelOverlayOptions,
+  type MagnifierOverlayOptions,
+  type OverlayOptionsMap,
+} from "./options";

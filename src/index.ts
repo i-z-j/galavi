@@ -18,6 +18,7 @@ export type {
   State,
   ViewConfig,
   ControlOptions,
+  OverlayOptions,
   PhysicalSpace,
   LayerConfig,
   Exploration,
@@ -55,6 +56,62 @@ export type {
   SourceFactory,
 } from "./registry";
 
+// === High-level Viewer facade (DX-L1/L2/M3/M6) ===
+// The common scientific viewer: one dataset session, modes, channels, camera,
+// controls/tools, and status — translated onto the low-level scene model
+// (engineering-cleanup-plan.md §15). `createGalavi` remains the advanced path;
+// `viewer.galavi` is the escape hatch.
+export {
+  Viewer,
+  ViewerSupersededError,
+  createViewer,
+} from "./viewer";
+export type {
+  ResolvedViewerMode,
+  ViewerCamera,
+  ViewerChannelAccessor,
+  ViewerChannelConfig,
+  ViewerChannelPatch,
+  ViewerChannelState,
+  ViewerConfig,
+  ViewerControlAccessor,
+  ViewerControlName,
+  ViewerControlOptionsMap,
+  ViewerControlsConfig,
+  ViewerMagnifierOptions,
+  ViewerMode,
+  ViewerModeOverride,
+  ViewerModeOverrides,
+  ViewerProjection,
+  ViewerStatus,
+  ViewerToolAccessor,
+  ViewerToolName,
+  ViewerToolOptionsMap,
+  ViewerToolsConfig,
+  ViewerViewAccessor,
+} from "./viewer";
+
+// === Dataset resolution (DX-M1) ===
+// Format-neutral resolved-dataset contract, resolved once per source identity
+// and shared across layers. Layers OVER the per-layer Data.source registry;
+// adapters register resolvers via registerDatasetResolver (their registration
+// entry points, e.g. registerOMEZarrSource(), do both).
+export {
+  openDataset,
+  invalidateDataset,
+  invalidateAllDatasets,
+  registerDatasetResolver,
+  datasetCacheKey,
+  getDatasetCapabilities,
+} from "./dataset";
+export type {
+  ResolvedDataset,
+  ResolvedChannel,
+  DatasetDimension,
+  DatasetCapabilities,
+  DatasetResolver,
+} from "./dataset";
+
 export { BaseControl } from "./control";
 export {
   BaseOverlay,
@@ -65,6 +122,13 @@ export {
   type MagnifierDimension,
   type MagnifierOptions,
   FoldablePanelOverlay,
+  type BaseOverlayOptions,
+  type CrosshairOverlayOptions,
+  type RulerOverlayOptions,
+  type RoiSelectorOverlayOptions,
+  type FoldablePanelOverlayOptions,
+  type MagnifierOverlayOptions,
+  type OverlayOptionsMap,
   type RoiBox,
   type RoiChangeKind,
   type RoiChangePhase,
@@ -81,6 +145,8 @@ export {
   type Shader,
   type LayerParams,
   type LayerClass,
+  type LayerLoadStatus,
+  type LayerLoadState,
 } from "./layer";
 export {
   TiledImageLayer,
@@ -143,6 +209,8 @@ export {
 //                         sourceChanged, resolveDataUrl,
 //                         countPyramidLevelTiles, pickPyramidLevel,
 //                         TileBounds, TileViewport,
+//                         planVolumePreview + VOLUME_PREVIEW_* budgets
+//                         (automatic volume tile-budget policy, DX-M4),
 //                         floatToFloat16, dtypeNormalization, makeFloat16Encoder
 //   - Input             — normalizeWheel, normalizeDrag
 //   - Vectors           — cameraBasis, subtract, cross, dot, normalize

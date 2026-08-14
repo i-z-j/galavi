@@ -3,6 +3,7 @@
  */
 
 import type { DeepPartial, GalaviTheme } from "./overlay/theme";
+import type { OverlayOptionsMap } from "./overlay/options";
 import type {
   FlyControlOptions,
   OrbitControlOptions,
@@ -71,6 +72,17 @@ export type ControlOptions = {
 };
 
 /**
+ * Overlay option bags keyed by overlay type. The built-in overlay types
+ * (see {@link OverlayOptionsMap}) carry their typed options; custom overlay
+ * types registered via `registerOverlay` accept any options bag.
+ */
+export type OverlayOptions = {
+  [type: string]: Record<string, unknown> | undefined;
+} & {
+  [K in keyof OverlayOptionsMap]?: OverlayOptionsMap[K];
+};
+
+/**
  * View configuration — defines a single view within a Galavi instance.
  * Views are keyed by name in `GalaviConfig.views`; the key is the view ID.
  */
@@ -84,7 +96,7 @@ export interface ViewConfig {
   /** Controls to attach, keyed by control type (e.g. { orbit: {}, fly: {} }) */
   controls?     : ControlOptions;
   /** Overlays to attach, keyed by overlay type (e.g. { crosshair: {}, ruler: { visible: false } }) */
-  overlays?     : Record<string, Record<string, unknown>>;
+  overlays?     : OverlayOptions;
   /** Human-readable label for this view */
   label?        : string;
   /** Whether this view can become the active view (default: true) */
@@ -325,12 +337,12 @@ export interface Render {
   /** Contrast limits [min, max] in normalized [0,1] range */
   contrastLimits? : [number, number];
   /**
-   * Volume ray-march accumulation mode (consumed by volume layers):
+   * Volume ray-march accumulation projection (consumed by volume layers):
    * `"mip"` max-intensity, `"minip"` min-intensity, `"mean"` average of
    * samples. The same contrast window and colormap apply to the accumulated
-   * value in every mode. Default: `"mip"`.
+   * value in every projection. Default: `"mip"`.
    */
-  mode?           : VolumeRenderMode;
+  volumeProjection? : VolumeRenderMode;
   /** Whether this layer is visible */
   visible?        : boolean;
   /** Render geometry as wireframe (consumed by mesh-style layers). */

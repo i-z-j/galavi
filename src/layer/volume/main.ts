@@ -11,21 +11,26 @@
  */
 
 import type {
+  Data,
   ImagePyramid,
   LayerConfig,
   Vec3,
   VolumeRenderMode,
 } from "../../types";
 import {
+  planVolumePreview,
   UNIT_CUBE,
   optBoolean,
   optNumber,
   optNumberRecord,
   optString,
   optVec2,
+  VOLUME_PREVIEW_POOL_HEADROOM,
   type AxisIndex,
   type TilePlacement,
   type TilePlan,
+  type TileSpec,
+  type VolumePreviewPlan,
 } from "../../utils";
 import {
   transformAABB,
@@ -44,8 +49,8 @@ import shaderCode from "./shader.wgsl?raw";
 // === Volume Parameters ===
 
 /**
- * Volume layer config. The ray-march accumulation mode is a render option,
- * not an option-bag key: set it via `render.mode`
+ * Volume layer config. The ray-march accumulation projection is a render
+ * option, not an option-bag key: set it via `render.volumeProjection`
  * (`"mip" | "minip" | "mean"`, default `"mip"`).
  */
 export interface VolumeConfig extends TiledImageOptions {
@@ -69,9 +74,9 @@ const VOLUME_MODE_CODES: Record<VolumeRenderMode, number> = {
 const VOLUME_MODES = Object.keys(VOLUME_MODE_CODES) as VolumeRenderMode[];
 
 /**
- * Checked reader for `render.mode`, following the config-boundary policy: a
- * missing, wrong-typed, or unknown value reads as `undefined` so the caller
- * falls back to the default (`"mip"`).
+ * Checked reader for `render.volumeProjection`, following the config-boundary
+ * policy: a missing, wrong-typed, or unknown value reads as `undefined` so
+ * the caller falls back to the default (`"mip"`).
  */
 export function optVolumeMode(value: unknown): VolumeRenderMode | undefined {
   const str = optString(value);
@@ -177,8 +182,47 @@ export class VolumeLayer extends TiledImageLayer {
 
   // === TiledImageLayer hooks (3D) ===
 
-  protected get tileLabel(): string { return "VolumeLayer"; }
+  protected override get tileLabel(): string { return "VolumeLayer"; }
   protected get levelAxes(): readonly AxisIndex[] { return [0, 1, 2]; }
+
+  /**
+   * Automatic volume tile-budget policy (DX-M4). Volume layers keep every z
+   * slab of the chosen level resident, so z-chunk=1 pyramids with hundreds of
+   * slabs per level are unrenderable as-is. When the app did NOT pass an
+   * explicit `maxPoolSize` override, such pyramids are replaced here by a
+   * bounded z-strided preview (see `planVolumePreview`), and `getTileSpec`
+   * sizes the pool to hold the largest preview level. Well-behaved pyramids,
+   * urlTemplate-only sources (no fetch to remap), explicit overrides, and
+   * region-bounded layers pass through untouched: a `region` crop (e.g. the
+   * 3D magnifier's level-0 voxel block) already bounds tile residency to the
+   * ROI, and full resolution there is both affordable and the point of the
+   * crop — a strided preview would visibly degrade it.
+   */
+  private previewPlan: VolumePreviewPlan | null = null;
+
+  protected override applyEffectiveSourcePolicy(source: Data | undefined): Data | undefined {
+    this.previewPlan = null;
+    if (!source?.pyramid || !source.fetch || this.maxPoolSize !== undefined) {
+      return source;
+    }
+    if (this.getNormalizedRegion()) return source;
+    const plan = planVolumePreview(source.pyramid);
+    if (!plan) return source;
+    this.previewPlan = plan;
+    return {
+      ...source,
+      pyramid : plan.pyramid,
+      fetch   : plan.wrapFetch(source.fetch),
+    };
+  }
+
+  override getTileSpec(): TileSpec | null {
+    const spec = super.getTileSpec();
+    if (spec && this.previewPlan && this.maxPoolSize === undefined) {
+      spec.maxPoolSize = this.previewPlan.maxTiles + VOLUME_PREVIEW_POOL_HEADROOM;
+    }
+    return spec;
+  }
 
   protected slotSize(pyramid: ImagePyramid): Vec3 {
     return pyramid.levels.reduce<Vec3>((max, level) => [
@@ -247,7 +291,7 @@ export class VolumeLayer extends TiledImageLayer {
 
   protected override applyRenderConfig(desc: LayerConfig): void {
     super.applyRenderConfig(desc);
-    this.setMode(optVolumeMode(desc.render?.mode) ?? "mip");
+    this.setMode(optVolumeMode(desc.render?.volumeProjection) ?? "mip");
   }
 
   getGeometry(): Geometry {

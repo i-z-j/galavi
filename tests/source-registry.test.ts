@@ -254,3 +254,173 @@ describe("Data.source descriptor resolution", () => {
     }
   });
 });
+
+describe("source failure channel (DX-M2)", () => {
+  const GOOD_TYPE = "fake-source-good";
+  let galavi: Galavi | undefined;
+
+  beforeEach(() => {
+    vi.stubGlobal("requestAnimationFrame", () => 0);
+    vi.stubGlobal("cancelAnimationFrame", () => {});
+  });
+
+  afterEach(() => {
+    galavi?.destroy();
+    galavi = undefined;
+    sourceRegistry.unregister(SOURCE_TYPE);
+    sourceRegistry.unregister(GOOD_TYPE);
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  async function setup(layers: State["layers"]): Promise<Galavi> {
+    galavi = await createGalavi({
+      state: {
+        layers,
+        exploration: {
+          camera: {
+            navMode  : "orbit",
+            projMode : "perspective",
+            position : [1.13, 0.12, 1.13],
+            target   : [0.5, 0.5, 0.5],
+          },
+        },
+      },
+      views: { main: { type: "volume", layers: layers.map((l) => l.id) } },
+    });
+    return galavi;
+  }
+
+  test("failed resolution rejects whenLayerReady with the factory's error (cause preserved)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const d = deferred<ResolvedSource>();
+    registerSource(SOURCE_TYPE, () => d.promise);
+
+    const g = await setup([
+      { id: "v", type: "volume", data: { source: DESC } },
+      { id: "p", type: "points" },
+    ]);
+
+    // Status query while the resolution is in flight.
+    expect(g.view("main").getLayerStatus("v")).toEqual({ status: "loading" });
+    expect(g.view("main").getLayerStatus("p")).toEqual({ status: "ready" });
+    expect(g.view("main").getLayerStatus("nope")).toBeUndefined();
+
+    // Adapter-style wrapped error: message + cause chain survive as-is.
+    const cause     = new TypeError("Failed to fetch");
+    const openError = new Error(`Failed to open store at ${DESC.url} (network/CORS)`, { cause });
+    const ready     = g.view("main").whenLayerReady("v");
+    const assertion = expect(ready).rejects.toBe(openError);
+    d.reject(openError);
+    await assertion;
+
+    // The recorded error is queryable, and later calls reject immediately
+    // with the same error instead of pending forever.
+    const status = g.view("main").getLayerStatus("v");
+    expect(status?.status).toBe("error");
+    expect(status?.error).toBe(openError);
+    expect(status?.error?.cause).toBe(cause);
+    await expect(g.view("main").whenLayerReady("v")).rejects.toBe(openError);
+
+    // Sibling layers are unaffected.
+    await expect(g.view("main").whenLayerReady("p")).resolves.toBeDefined();
+  });
+
+  test("registry miss: actionable error names the registered types and keeps the cause", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    registerSource(SOURCE_TYPE, () => new Promise<ResolvedSource>(() => {}));
+
+    const g = await setup([
+      { id: "v", type: "volume", data: { source: { type: "unregistered-source", url: "mem://x" } } },
+    ]);
+
+    const status = g.view("main").getLayerStatus("v");
+    expect(status?.status).toBe("error");
+    expect(status?.error?.message).toContain('Unknown source type: "unregistered-source"');
+    expect(status?.error?.message).toContain('for layer "v"');
+    // Registered types are named so the developer sees what IS available.
+    expect(status?.error?.message).toContain(SOURCE_TYPE);
+    expect(status?.error?.message).toContain("registerOMEZarrSource");
+    expect(status?.error?.cause).toBeInstanceOf(Error);
+    expect(String(status?.error?.cause)).toContain('Unknown type: "unregistered-source"');
+
+    await expect(g.view("main").whenLayerReady("v"))
+      .rejects.toThrow('Unknown source type: "unregistered-source"');
+  });
+
+  test("abort wins over a late failure", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const d = deferred<ResolvedSource>();
+    registerSource(SOURCE_TYPE, () => d.promise);
+
+    const g = await setup([{ id: "v", type: "volume", data: { source: DESC } }]);
+
+    const controller = new AbortController();
+    const ready = g.view("main").whenLayerReady("v", { signal: controller.signal });
+    controller.abort();
+    d.reject(new Error("boom"));
+    // The aborted waiter was already removed, so the late failure cannot
+    // reject it — the abort reason stands.
+    await expect(ready).rejects.toThrow(/abort/i);
+    expect(g.view("main").getLayerStatus("v")?.status).toBe("error");
+  });
+
+  test("a pre-aborted signal wins over an already-recorded error", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    registerSource(SOURCE_TYPE, () => Promise.reject(new Error("boom")));
+
+    const g = await setup([{ id: "v", type: "volume", data: { source: DESC } }]);
+    await flush();
+    expect(g.view("main").getLayerStatus("v")?.status).toBe("error");
+
+    const controller = new AbortController();
+    controller.abort();
+    await expect(g.view("main").whenLayerReady("v", { signal: controller.signal }))
+      .rejects.toThrow(/abort/i);
+  });
+
+  test("status transitions: idle → loading → ready", async () => {
+    const d = deferred<ResolvedSource>();
+    registerSource(SOURCE_TYPE, () => d.promise);
+
+    const g = await setup([
+      { id: "empty", type: "volume" },
+      { id: "v", type: "volume", data: { source: DESC } },
+    ]);
+
+    expect(g.view("main").getLayerStatus("empty")).toEqual({ status: "idle" });
+    expect(g.view("main").getLayerStatus("v")).toEqual({ status: "loading" });
+
+    // A source-less layer is ready in the legacy `isReady` sense.
+    await expect(g.view("main").whenLayerReady("empty")).resolves.toBeDefined();
+
+    const layer = g.view("main").getLayer("v")!;
+    d.resolve({ pyramid: PYRAMID, fetch: fakeFetch });
+    await expect(g.view("main").whenLayerReady("v")).resolves.toBe(layer);
+    expect(g.view("main").getLayerStatus("v")).toEqual({ status: "ready" });
+  });
+
+  test("a new source clears the recorded error and retries", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    registerSource(SOURCE_TYPE, () => Promise.reject(new Error("boom")));
+    const d = deferred<ResolvedSource>();
+    registerSource(GOOD_TYPE, () => d.promise);
+
+    const g = await setup([{ id: "v", type: "volume", data: { source: DESC } }]);
+    await flush();
+    expect(g.view("main").getLayerStatus("v")?.status).toBe("error");
+
+    const layer = g.view("main").getLayer("v")!;
+    layer.applyConfig({
+      id   : "v",
+      type : "volume",
+      data : { source: { type: GOOD_TYPE, url: "mem://fixed" } },
+    });
+    expect(g.view("main").getLayerStatus("v")).toEqual({ status: "loading" });
+
+    const ready = g.view("main").whenLayerReady("v");
+    d.resolve({ pyramid: PYRAMID, fetch: fakeFetch });
+    await expect(ready).resolves.toBe(layer);
+    expect(g.view("main").getLayerStatus("v")).toEqual({ status: "ready" });
+  });
+});

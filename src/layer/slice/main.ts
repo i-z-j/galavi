@@ -33,6 +33,7 @@ import {
   type LayerParams,
 } from "../base";
 import {
+  TILED_IMAGE_OPTION_KEYS,
   TiledImageLayer,
   type TileLevelContext,
   type TileLevelGrid,
@@ -151,6 +152,14 @@ export class SliceLayerParams implements LayerParams {
 
 // === Slice Layer ===
 
+/** SliceLayer's recognized option keys: the tiled-image set plus slice specifics. */
+const SLICE_OPTION_KEYS: readonly string[] = [
+  ...TILED_IMAGE_OPTION_KEYS,
+  "axes",
+  "mipThickness",
+  "sliceIndex",
+];
+
 export class SliceLayer extends TiledImageLayer {
   static readonly layerType = "slice";
   static fromConfig(id: string, desc: SliceLayerConfig): SliceLayer {
@@ -236,7 +245,10 @@ export class SliceLayer extends TiledImageLayer {
 
   // === TiledImageLayer hooks (2D planes) ===
 
-  protected get tileLabel(): string { return "SliceLayer"; }
+  protected override get tileLabel(): string { return "SliceLayer"; }
+  protected override get knownOptionKeys(): readonly string[] {
+    return SLICE_OPTION_KEYS;
+  }
   protected get levelAxes(): readonly AxisIndex[] { return [this.axisMap[0], this.axisMap[1]]; }
 
   protected slotSize(pyramid: ImagePyramid): Vec3 {

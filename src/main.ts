@@ -30,8 +30,9 @@ import {
   BaseView,
 } from "./view";
 import { createView, type ViewRuntime } from "./view/runtime";
-import type { BaseLayer } from "./layer";
+import type { BaseLayer, LayerLoadState } from "./layer";
 import { resolveTheme, type GalaviTheme } from "./overlay/theme";
+import type { OverlayOptionsMap } from "./overlay/options";
 import { cameraDistance, cameraAngles, computePosition, computeForward } from "./utils";
 import { vec3 } from "wgpu-matrix";
 
@@ -47,14 +48,33 @@ type LayerAccessor<TOptions = Record<string, unknown>> = {
 };
 
 type ViewAccessor = {
-  setOverlayOptions(overlayType: string, opts: Record<string, unknown>): void;
+  /**
+   * Update a view overlay's options at runtime. Built-in overlay types
+   * (`OverlayOptionsMap` keys) get their exact options bag — a misspelled key
+   * is a compile error; custom overlay types registered via `registerOverlay`
+   * keep the `Record<string, unknown>` escape hatch.
+   */
+  setOverlayOptions<K extends string>(
+    overlayType : K,
+    opts        : K extends keyof OverlayOptionsMap
+      ? Partial<OverlayOptionsMap[K]>
+      : Record<string, unknown>,
+  ): void;
   getLayer(id: ID): BaseLayer | undefined;
   /**
    * Resolve once the layer reports `isReady` (see `BaseView.whenLayerReady`
    * for the full semantics). Rejects when the layer ID is unknown in this
-   * view, when `opts.signal` aborts, or when the layer/view goes away.
+   * view, when the layer's source fails to load (DX-M2 — with the recorded
+   * load error), when `opts.signal` aborts, or when the layer/view goes away.
    */
   whenLayerReady(layerId: ID, opts?: { signal?: AbortSignal }): Promise<BaseLayer>;
+  /**
+   * Snapshot of a layer's load state (DX-M2): `idle` / `loading` / `ready` /
+   * `error`, with the recorded error when failed (see
+   * `BaseView.getLayerStatus`). Returns undefined when the layer ID is
+   * unknown in this view.
+   */
+  getLayerStatus(layerId: ID): LayerLoadState | undefined;
   getCurrentLevel(layerId: ID): number | undefined;
   getResolution(layerId: ID): ViewResolution | undefined;
   readonly config: ViewConfig;
@@ -339,8 +359,7 @@ export class Galavi {
       setOverlayOptions: (overlayType: string, opts: Record<string, unknown>) => {
         vr.overlays.get(overlayType)?.setOptions?.(opts);
         this.requestRender();
-      },
-      getLayer: (id: ID) => vr.layers.get(id),
+      },      getLayer: (id: ID) => vr.layers.get(id),
       whenLayerReady: (layerId: ID, opts?: { signal?: AbortSignal }) => {
         const layer = vr.layers.get(layerId);
         if (!layer) {
@@ -350,6 +369,7 @@ export class Galavi {
         }
         return vr.view.whenLayerReady(layer, opts?.signal);
       },
+      getLayerStatus: (layerId: ID) => vr.view.getLayerStatus(layerId),
       getCurrentLevel: (layerId: ID) => vr.view.getCurrentLevel(layerId),
       getResolution: (layerId: ID) => vr.view.getResolution(layerId),
       get config() {

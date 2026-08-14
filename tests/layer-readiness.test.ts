@@ -131,4 +131,13 @@ describe("view(id).whenLayerReady", () => {
     await expect(g.view("main").whenLayerReady("a", { signal: controller.signal }))
       .rejects.toThrow(/abort/i);
   });
+
+  test("loadStatus tracks readiness for plain async layers (DX-M2 default)", async () => {
+    const { galavi: g, layer } = await setup();
+    expect(layer.loadError).toBeUndefined();
+    expect(g.view("main").getLayerStatus("a")).toEqual({ status: "loading" });
+
+    layer.finish();
+    expect(g.view("main").getLayerStatus("a")).toEqual({ status: "ready" });
+  });
 });

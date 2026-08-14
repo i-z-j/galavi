@@ -71,7 +71,9 @@ export function createView(
   const overlayMap = new Map<string, BaseOverlay>();
   for (const [overlayType, overlayOpts] of Object.entries(config.overlays ?? {})) {
     const overlay = overlayRegistry.create(overlayType);
-    overlay.setOptions?.(overlayOpts);
+    // Registry boundary is untyped: built-in overlays re-parse their own
+    // options in `setOptions`, so a plain options bag suffices here.
+    overlay.setOptions?.(overlayOpts as Record<string, unknown> | undefined);
     view.addOverlay(overlay);
     overlayMap.set(overlayType, overlay);
   }
