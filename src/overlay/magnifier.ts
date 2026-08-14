@@ -777,10 +777,9 @@ export class MagnifierOverlay extends BaseOverlay {
       let instance: ViewerEngine;
       try {
         // Lazy: a static value import would close a module cycle
-        // (registry → magnifier → viewer → dataset → registry) and hit
-        // dataset.ts's top-level `new Registry()` before registry.ts
-        // finishes initializing. `../viewer` is already in the main chunk
-        // via the package entry, so this adds no split chunk.
+        // (registry → magnifier → viewer → dataset → registry), risking
+        // partially-initialized module bindings. `../viewer` is already in
+        // the main chunk via the package entry, so this adds no split chunk.
         const { createViewerEngine } = await import("../viewer");
         instance = await createViewerEngine({
           state: nestedState,

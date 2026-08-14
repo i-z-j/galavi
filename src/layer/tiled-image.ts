@@ -3,12 +3,14 @@
  * (VolumeLayer: 3D chunks, SliceLayer: 2D planes).
  *
  * Owns everything the two layers do identically: source/selection state and
- * versioning, declarative source-descriptor resolution (`Data.source` via
- * `sourceRegistry`), the tile-residency spec, and the per-frame plan flow
- * (level pick → chunk enumeration → params sync → loader). The genuine
- * dimensional differences stay in the concrete layer as small hooks:
- * level-selection axes, slot-size computation, level-grid projection,
- * tile metadata, fetch-position mapping, and viewport/grid params arity.
+ * versioning, the tile-residency spec, and the per-frame plan flow (level
+ * pick → chunk enumeration → params sync → loader). The genuine dimensional
+ * differences stay in the concrete layer as small hooks: level-selection
+ * axes, slot-size computation, level-grid projection, tile metadata,
+ * fetch-position mapping, and viewport/grid params arity.
+ *
+ * Sources are explicit `Data` configs (`pyramid`/`fetch`/`url`…); dataset
+ * kinds produce them — there is no per-layer source resolution.
  */
 
 import type {
@@ -16,7 +18,6 @@ import type {
   ImagePyramid,
   ImagePyramidLevel,
   LayerConfig,
-  SourceDescriptor,
   Vec3,
 } from "../types";
 import {
@@ -32,10 +33,6 @@ import {
   type TileSpec,
   type TileViewport,
 } from "../utils";
-import {
-  sourceRegistry,
-  type ResolvedSource,
-} from "../registry";
 import { BaseLayer, type LayerLoadStatus } from "./base";
 
 /** Options shared by every tiled image layer. */
@@ -133,21 +130,6 @@ export abstract class TiledImageLayer extends BaseLayer {
   private region?        : { min: Vec3; max: Vec3 };
   private finestLevel    = false;
 
-  /**
-   * Runtime artifacts resolved from `source.source` via `sourceRegistry`.
-   * Never written back into `State` — the descriptor stays the canonical,
-   * JSON-serializable form of the source.
-   */
-  private resolvedSource? : ResolvedSource;
-  /** Monotonic token invalidating superseded async resolutions. */
-  private sourceEpoch     = 0;
-  /**
-   * Recorded source-resolution failure (DX-M2). Set when descriptor
-   * resolution fails, cleared when a new resolution starts. Surfaces through
-   * `loadStatus` / `loadError` and rejects `whenLayerReady` waiters.
-   */
-  private sourceError?    : Error;
-
   private currentLevel : number;
 
   constructor(id?: string, config?: TiledImageOptions) {
@@ -165,7 +147,6 @@ export abstract class TiledImageLayer extends BaseLayer {
     this.region       = readRegion(config?.region);
     this.finestLevel  = config?.finestLevel === true;
     this.currentLevel = Math.max(0, (this.source?.pyramid?.levels.length ?? 1) - 1);
-    this.resolveSourceDescriptor();
   }
 
   // === Dimensional hooks (the real 2D/3D differences) ===
@@ -221,8 +202,8 @@ export abstract class TiledImageLayer extends BaseLayer {
     if (!sameRegion(this.region, region)) {
       this.region = region;
       // The volume preview policy keys off the region (VolumeLayer), and the
-      // effective source is memoized per (source, resolvedSource) pair — drop
-      // the memo so the policy re-evaluates against the new region.
+      // effective source is memoized per source — drop the memo so the policy
+      // re-evaluates against the new region.
       this.effectiveSourceCache = undefined;
     }
     this.finestLevel = optBoolean(desc.options?.finestLevel) ?? false;
@@ -237,179 +218,47 @@ export abstract class TiledImageLayer extends BaseLayer {
     if (!sourceChanged(source, this.source)) return;
     this.source = source;
     this.dataVersion++;
-    this.resolveSourceDescriptor();
   }
 
-  // === Declarative source descriptors (Data.source) ===
+  // === Effective source ===
 
   /**
-   * The config source overlaid with descriptor-resolved runtime artifacts.
-   * Explicit `pyramid`/`fetch` in the config always win over resolved ones.
-   * The merged source then passes through {@link applyEffectiveSourcePolicy}
-   * (identity by default); the result is memoized on the inputs so per-frame
-   * readers do not re-derive it.
+   * The explicit config source passed through
+   * {@link applyEffectiveSourcePolicy}; the result is memoized per source so
+   * per-frame readers do not re-derive it.
    */
   private effectiveSourceCache?: {
-    source   : Data | undefined;
-    resolved : ResolvedSource | undefined;
-    value    : Data | undefined;
+    source : Data | undefined;
+    value  : Data | undefined;
   };
 
   protected get effectiveSource(): Data | undefined {
-    const source   = this.source;
-    const resolved = this.resolvedSource;
+    const source = this.source;
     const cache = this.effectiveSourceCache;
-    if (cache && cache.source === source && cache.resolved === resolved) {
-      return cache.value;
-    }
-    const merged: Data | undefined = (!source || !resolved) ? source : {
-      ...source,
-      pyramid : source.pyramid ?? resolved.pyramid,
-      fetch   : source.fetch   ?? resolved.fetch,
-    };
-    const value = this.applyEffectiveSourcePolicy(merged);
-    this.effectiveSourceCache = { source, resolved, value };
+    if (cache && cache.source === source) return cache.value;
+    const value = this.applyEffectiveSourcePolicy(source);
+    this.effectiveSourceCache = { source, value };
     return value;
   }
 
   /**
-   * Policy hook over the merged effective source — subclasses may substitute
-   * a bounded pyramid/fetch pair (e.g. VolumeLayer's automatic preview
-   * budgets for pathological z-chunk=1 pyramids, DX-M4). Identity by default.
-   * Must be pure: the result is cached per (source, resolvedSource) pair.
+   * Policy hook over the effective source — subclasses may substitute a
+   * bounded pyramid/fetch pair (e.g. VolumeLayer's automatic preview budgets
+   * for pathological z-chunk=1 pyramids, DX-M4). Identity by default. Must be
+   * pure: the result is cached per source.
    */
   protected applyEffectiveSourcePolicy(source: Data | undefined): Data | undefined {
     return source;
   }
 
-  /** Runtime artifacts produced by the last successful descriptor resolution. */
-  getResolvedSource(): ResolvedSource | undefined {
-    return this.resolvedSource;
-  }
-
   /**
-   * Ready unless a declarative source descriptor still needs resolution.
-   * Sources with an explicit `pyramid`/`fetch` (and sources without a
-   * descriptor) are always ready, matching the pre-descriptor behavior.
-   */
-  override get isReady(): boolean {
-    const source = this.source;
-    if (!source?.source || source.pyramid || source.fetch) return true;
-    return this.resolvedSource !== undefined;
-  }
-
-  /**
-   * Load state for descriptor-backed sources (DX-M2): `"error"` once a
-   * resolution failure is recorded, `"idle"` when no source is set,
-   * `"loading"` while a descriptor resolution is in flight, `"ready"`
-   * otherwise. (`isReady` stays `true` for source-less layers to match the
-   * pre-descriptor behavior; `loadStatus` is the finer-grained query.)
+   * Load state (DX-M2): `"idle"` when no source is set, `"ready"` otherwise.
+   * Sources are explicit configs — a `Data` without `pyramid`/`fetch` no
+   * longer triggers any async resolution.
    */
   override get loadStatus(): LayerLoadStatus {
-    if (this.sourceError) return "error";
-    const source = this.source;
-    if (!source) return "idle";
-    if (!source.source || source.pyramid || source.fetch) return "ready";
-    return this.resolvedSource !== undefined ? "ready" : "loading";
+    return this.source ? "ready" : "idle";
   }
-
-  /** The recorded source-resolution failure, when `loadStatus` is `"error"`. */
-  override get loadError(): Error | undefined {
-    return this.sourceError;
-  }
-
-  /**
-   * Kick off asynchronous resolution of `source.source` (if any) through
-   * `sourceRegistry`. Explicit `pyramid`/`fetch` take precedence — the
-   * descriptor is ignored while either is present.
-   *
-   * Failure semantics (DX-M2): the error is logged via `console.error` with
-   * the descriptor, recorded on the layer (`loadStatus` → `"error"`,
-   * `loadError`), and signaled through the render-request channel so pending
-   * and later `whenLayerReady` calls reject with it. The Galavi instance and
-   * other layers are unaffected; setting a new source clears the recorded
-   * error and retries.
-   */
-  private resolveSourceDescriptor(): void {
-    this.sourceEpoch++;
-    this.resolvedSource = undefined;
-    this.sourceError    = undefined;
-
-    const source = this.source;
-    const desc   = source?.source;
-    if (!desc || source?.pyramid || source?.fetch) return;
-
-    const epoch = this.sourceEpoch;
-    let pending: Promise<ResolvedSource>;
-    try {
-      pending = sourceRegistry.create(desc.type, desc);
-    } catch (err) {
-      // Unknown source type — `create` throws synchronously. Record an
-      // actionable error naming the registered types (mirroring openDataset's
-      // unknown-type rejection) with the registry's error as `cause`.
-      this.failSourceResolution(this.unknownSourceTypeError(err, desc), err, desc);
-      return;
-    }
-
-    pending.then((resolved) => {
-      if (epoch !== this.sourceEpoch) return; // superseded by a newer source
-      this.resolvedSource = resolved;
-      if (resolved.selection) {
-        for (const [key, value] of Object.entries(resolved.selection)) {
-          if (this.selection[key] === undefined) this.selection[key] = value;
-        }
-      }
-      this.onSourceResolved(resolved);
-      this.dataVersion++;
-      // A renderer built before resolution has no tile residency; bump the
-      // geometry version so the view rebuilds it against the resolved pyramid.
-      this.geometryVersion++;
-      this.requestRender();
-    }).catch((err) => {
-      if (epoch !== this.sourceEpoch) return;
-      // Factory rejections are recorded as-is (never wrapped): adapters
-      // already reject with actionable, `cause`-chained errors — matching
-      // openDataset's "resolver errors reject as-is" policy — so the same
-      // failure surfaces identically on the per-layer path.
-      const error = err instanceof Error ? err : new Error(String(err));
-      this.failSourceResolution(error, err, desc);
-    });
-  }
-
-  /**
-   * Record a source-resolution failure, log it, and signal the view so
-   * pending `whenLayerReady` waiters reject. The signal is a no-op when the
-   * layer is not attached to a view yet — the recorded status stays
-   * queryable, and `whenLayerReady` checks it up front.
-   */
-  private failSourceResolution(recorded: Error, logged: unknown, desc: SourceDescriptor): void {
-    this.sourceError = recorded;
-    this.logSourceError(logged, desc);
-    this.requestRender();
-  }
-
-  private unknownSourceTypeError(cause: unknown, desc: SourceDescriptor): Error {
-    const registered = sourceRegistry.keys().join(", ") || "none";
-    return new Error(
-      `Unknown source type: "${desc.type}" for layer "${this.id}" (registered: ${registered}). ` +
-      "Register a source factory first — e.g. registerOMEZarrSource() from @galavi/ome-zarr-adapter.",
-      { cause },
-    );
-  }
-
-  private logSourceError(err: unknown, desc: SourceDescriptor): void {
-    console.error(
-      `[${this.tileLabel}] Failed to resolve source for layer "${this.id}" — load status is now "error":`,
-      err,
-      desc,
-    );
-  }
-
-  /**
-   * Hook invoked after a source descriptor resolves. Subclasses may re-derive
-   * pyramid-dependent state here (e.g. SliceLayer's plane sizes).
-   */
-  protected onSourceResolved(_resolved: ResolvedSource): void {}
 
   /** Tile residency descriptor — view-side LayerRenderer allocates the pool. */
   override getTileSpec(): TileSpec | null {

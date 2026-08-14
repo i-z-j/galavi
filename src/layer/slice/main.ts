@@ -223,8 +223,8 @@ export class SliceLayer extends TiledImageLayer {
 
   /**
    * Derive dataSize / in-plane size / slice count from the effective pyramid.
-   * Re-run when a declarative source descriptor resolves — until then the
-   * pyramid is unknown and these hold the [1,1,1] placeholder.
+   * Runs at construction; an explicit `pyramid` is required for real sizes —
+   * until then these hold the [1,1,1] placeholder.
    */
   private derivePlaneSizes(): void {
     this.dataSize = this.effectiveSource?.pyramid?.levels[0]?.shape ?? [1, 1, 1];
@@ -235,12 +235,6 @@ export class SliceLayer extends TiledImageLayer {
       Math.ceil(this.dataSize[s] / this.mipThickness),
     ];
     this.sliceCount = this.size[2];
-  }
-
-  protected override onSourceResolved(): void {
-    this.derivePlaneSizes();
-    // Keep the current slice inside the newly resolved plane range.
-    this.sliceIndex = Math.max(0, Math.min(this.sliceIndex, this.sliceCount - 1));
   }
 
   // === TiledImageLayer hooks (2D planes) ===

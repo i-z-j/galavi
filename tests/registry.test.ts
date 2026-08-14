@@ -5,11 +5,16 @@
 import { afterEach, describe, expect, test } from "vitest";
 import { PointsLayer } from "../src/layer";
 import {
+  Dataset,
+  type DatasetDefaults,
+} from "../src/dataset";
+import {
+  datasetRegistry,
   layerRegistry,
+  registerDataset,
   registerLayer,
-  registerSource,
-  sourceRegistry,
 } from "../src/registry";
+import type { LayerConfig } from "../src/types";
 
 describe("layerRegistry", () => {
   afterEach(() => {
@@ -41,31 +46,42 @@ describe("layerRegistry", () => {
   });
 });
 
-describe("sourceRegistry", () => {
+class StubDataset extends Dataset {
+  override async load(): Promise<void> {}
+  override dispose(): void {}
+  override deriveDefaults(): DatasetDefaults {
+    return { mode: "slice", selection: {} };
+  }
+  override createDefaultLayers(): LayerConfig[] {
+    return [];
+  }
+}
+
+describe("datasetRegistry", () => {
   afterEach(() => {
-    sourceRegistry.unregister("custom-source");
+    datasetRegistry.unregister("custom-dataset");
   });
 
-  test("registers and creates a source factory, resolves its promise", async () => {
-    expect(sourceRegistry.has("custom-source")).toBe(false);
-    registerSource("custom-source", async (desc) => ({
-      selection: { c: Number(desc.channel ?? 0) },
-    }));
-    expect(sourceRegistry.has("custom-source")).toBe(true);
-    expect(sourceRegistry.keys()).toContain("custom-source");
+  test("registers and creates a dataset kind", () => {
+    expect(datasetRegistry.has("custom-dataset")).toBe(false);
+    registerDataset("custom-dataset", (config) => new StubDataset(config));
+    expect(datasetRegistry.has("custom-dataset")).toBe(true);
+    expect(datasetRegistry.keys()).toContain("custom-dataset");
 
-    const resolved = await sourceRegistry.create("custom-source", {
-      type    : "custom-source",
-      channel : 2,
+    const dataset = datasetRegistry.create("custom-dataset", {
+      type   : "custom-dataset",
+      source : "mem://x",
     });
-    expect(resolved).toEqual({ selection: { c: 2 } });
+    expect(dataset).toBeInstanceOf(StubDataset);
+    expect(dataset.type).toBe("custom-dataset");
+    expect(dataset.config.source).toBe("mem://x");
 
-    expect(sourceRegistry.unregister("custom-source")).toBe(true);
-    expect(sourceRegistry.has("custom-source")).toBe(false);
+    expect(datasetRegistry.unregister("custom-dataset")).toBe(true);
+    expect(datasetRegistry.has("custom-dataset")).toBe(false);
   });
 
-  test("throws `Unknown type` for an unregistered type", () => {
-    expect(() => sourceRegistry.create("nope", { type: "nope" }))
+  test("throws `Unknown type` for an unregistered kind", () => {
+    expect(() => datasetRegistry.create("nope", { type: "nope" }))
       .toThrow('Unknown type: "nope"');
   });
 });

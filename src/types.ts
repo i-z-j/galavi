@@ -262,42 +262,10 @@ export interface ViewResolution {
   unitsPerPixel         : number;
 }
 
-/**
- * SourceDescriptor — declarative, JSON-serializable description of a data
- * source (e.g. an OME-Zarr store URL). Adapters register a `SourceFactory`
- * for their `type` key via `registerSource`; tiled layers resolve
- * `Data.source` through that factory into runtime artifacts (pyramid/fetch).
- *
- * The descriptor must survive `JSON.parse(JSON.stringify(...))` unchanged —
- * it is what gets serialized in `State`.
- */
-export interface SourceDescriptor {
-  /** Source type key, resolved via `sourceRegistry`. */
-  type : string;
-  /** Optional source URL or path. */
-  url? : string;
-  [key: string]: unknown;
-}
-
 /** Data configuration */
 export interface Data {
   /** Source URL or path */
   url?: string;
-  /**
-   * Declarative, JSON-serializable source descriptor, resolved asynchronously
-   * through `sourceRegistry` (see `registerSource` in registry.ts).
-   *
-   * The descriptor is the canonical form of the source: the resolved
-   * `pyramid`/`fetch` live on the layer instance as runtime state and are
-   * never written back into `State`, so `getState()` stays pure JSON.
-   *
-   * Precedence: an explicit `pyramid` or `fetch` on this object always wins —
-   * the descriptor is ignored when either is present.
-   *
-   * Resolution failure is surfaced via `console.error` (with the descriptor);
-   * the layer stays not-ready and other layers are unaffected.
-   */
-  source?: SourceDescriptor;
   /** Normalized multiscale image metadata for tiled raster layers. */
   pyramid?: ImagePyramid;
   /**

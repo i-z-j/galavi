@@ -31,7 +31,6 @@ import type {
   OverlayOptions,
   PhysicalSpace,
   Render,
-  SourceDescriptor,
   State,
   Vec3,
   ViewConfig,
@@ -57,7 +56,7 @@ import type {
   RoiSelectorOverlayOptions,
   RulerOverlayOptions,
 } from "./overlay/options";
-import { openDataset, type ResolvedDataset } from "./dataset";
+import { openDataset, type Dataset, type DatasetConfig } from "./dataset";
 import { controlRegistry, overlayRegistry } from "./registry";
 import type {
   BaseControl,
@@ -638,10 +637,9 @@ export function normalizeInitialState(state: State): State {
 // ============================================================================
 
 /**
- * Visualization mode. `"auto"` resolves deterministically per dataset
- * capabilities (§16): z=1 → slice; z>1 → volume when the dataset reports 3D
- * support and the automatic tile-budget policy (DX-M4) yields a valid bounded
- * preview; otherwise slice, with volume still exposed in
+ * Visualization mode. `"auto"` resolves per dataset via
+ * `Dataset.deriveDefaults()` (e.g. image datasets resolve volume vs slice
+ * from their capabilities); unavailable modes are still exposed through
  * `viewer.availableModes`.
  */
 export type ViewerMode = "auto" | "slice" | "volume" | "quad";
@@ -736,8 +734,8 @@ export type ViewerModeOverrides = Partial<Record<ResolvedViewerMode, ViewerModeO
  * contract: no callbacks, no runtime resources.
  */
 export interface ViewerConfig {
-  /** Dataset source descriptor; resolved via `openDataset` (DX-M1). */
-  source?        : SourceDescriptor;
+  /** Dataset config; opened via `openDataset` (dataset registry). */
+  dataset?       : DatasetConfig;
   /** Visualization mode (default `"auto"`). */
   mode?          : ViewerMode;
   /** Channel overrides over the dataset's normalized channels. */
@@ -1049,6 +1047,9 @@ function normalizeModeOverrides(value: ViewerModeOverrides | undefined): ViewerM
 
 type ViewKind = "volume" | "slice";
 
+/** Fallback framing for datasets that report no physical space ([0,1]³). */
+const DEFAULT_PHYSICAL: PhysicalSpace = { spatial: { size: [1, 1, 1] } };
+
 /** Quad layout: three orthogonal slice planes plus one volume view. */
 const QUAD_PLANES = [
   { id: "quad-xy", axes: ["x", "y"] },
@@ -1129,15 +1130,12 @@ function mergeCamera(base: Camera, partial: Partial<Camera>): Camera {
 }
 
 /**
- * Capability-aware `"auto"` rule (§16): z=1 → slice; z>1 → volume when the
- * dataset supports 3D and the automatic tile-budget policy (DX-M4) yields a
- * valid bounded preview; otherwise slice.
+ * `"auto"` delegates to the dataset kind: `deriveDefaults().mode` decides
+ * (e.g. image datasets resolve volume vs slice from their capabilities).
  */
-function resolveViewerMode(mode: ViewerMode, dataset: ResolvedDataset): ResolvedViewerMode {
+function resolveViewerMode(mode: ViewerMode, dataset: Dataset): ResolvedViewerMode {
   if (mode !== "auto") return mode;
-  const caps = dataset.capabilities;
-  if (caps.zDepth > 1 && caps.supports3D && caps.supportsVolumePreview) return "volume";
-  return "slice";
+  return dataset.deriveDefaults().mode;
 }
 
 // ============================================================================
@@ -1185,7 +1183,7 @@ export class Viewer {
   private readonly _target: ViewerTarget;
 
   // Declarative intent (mirrored by `viewer.config`).
-  private _source?: SourceDescriptor;
+  private _datasetConfig?: DatasetConfig;
   private _mode: ViewerMode = "auto";
   private _projection: ViewerProjection = "mip";
   private _cameraConfig: ViewerCamera = "fit";
@@ -1197,7 +1195,7 @@ export class Viewer {
   private _autoRotate?: ViewerConfig["autoRotate"];
 
   // Runtime state.
-  private _dataset?: ResolvedDataset;
+  private _dataset?: Dataset;
   private _engine?: ViewerEngine;
   private _unsubscribe?: () => void;
   /**
@@ -1243,14 +1241,14 @@ export class Viewer {
     this._modeOverrides = normalizeModeOverrides(config.modeOverrides);
     this._theme = config.theme ? { ...config.theme } : undefined;
     this._autoRotate = normalizeAutoRotate(config.autoRotate);
-    this._source = config.source;
+    this._datasetConfig = config.dataset;
     this._ready = Promise.resolve(this);
   }
 
   // === Accessors ===
 
-  /** The resolved dataset, once open (decision 19.4 — `dataset` names the runtime object). */
-  get dataset(): ResolvedDataset | undefined {
+  /** The opened dataset, once open (decision 19.4 — `dataset` names the runtime object). */
+  get dataset(): Dataset | undefined {
     return this._dataset;
   }
 
@@ -1312,7 +1310,7 @@ export class Viewer {
    */
   get config(): ViewerConfig {
     const config: ViewerConfig = {};
-    if (this._source) config.source = this._source;
+    if (this._datasetConfig) config.dataset = this._datasetConfig;
     config.mode = this._mode;
     const channels = this._dataset
       ? this._baseChannels().map((c) => ({ ...c, contrast: [...c.contrast] as [number, number] }))
@@ -1338,26 +1336,26 @@ export class Viewer {
 
   /**
    * Open (or replace) the dataset. Resolves with the dataset once ready;
-   * rejects with the resolver's error as-is (`cause` chains preserved) when
-   * the source fails, or with {@link ViewerSupersededError} when a newer
+   * rejects with the load error as-is (`cause` chains preserved) when the
+   * source fails, or with {@link ViewerSupersededError} when a newer
    * open/transition wins. Last-write-wins: a superseded open never clobbers
    * newer state.
    */
-  async open(source: SourceDescriptor): Promise<ResolvedDataset> {
+  async open(config: DatasetConfig): Promise<Dataset> {
     this._assertUsable("open");
     const revision = ++this._revision;
-    this._source = source;
+    this._datasetConfig = config;
     this._error = undefined;
     this._status = "loading";
-    const op = this._runOpen(source, revision);
+    const op = this._runOpen(config, revision);
     this._track(op);
     return op;
   }
 
-  private async _runOpen(source: SourceDescriptor, revision: number): Promise<ResolvedDataset> {
-    let dataset: ResolvedDataset;
+  private async _runOpen(config: DatasetConfig, revision: number): Promise<Dataset> {
+    let dataset: Dataset;
     try {
-      dataset = await openDataset(source);
+      dataset = await openDataset(config);
     } catch (err) {
       if (this._isCurrent(revision)) {
         this._error = err;
@@ -1365,7 +1363,9 @@ export class Viewer {
       }
       throw err;
     }
-    this._assertCurrent(revision, "open");
+    this._assertCurrent(revision, "open", () => dataset.dispose());
+    // The new dataset won the race — release the previous one.
+    this._dataset?.dispose();
     this._dataset = dataset;
     await this._rebuild(revision, resolveViewerMode(this._mode, dataset), undefined);
     return dataset;
@@ -1409,7 +1409,7 @@ export class Viewer {
   channel(index: number): ViewerChannelAccessor {
     this._assertUsable("channel");
     if (!this._dataset) {
-      throw new Error("viewer.channel(): no dataset open — call viewer.open(source) first");
+      throw new Error("viewer.channel(): no dataset open — call viewer.open() first");
     }
     if (!Number.isInteger(index) || index < 0 || index >= this._dataset.channels.length) {
       throw new Error(
@@ -1646,12 +1646,14 @@ export class Viewer {
 
   // === Teardown ===
 
-  /** Destroy the low-level instance, detach viewer-owned DOM, supersede in-flight work. */
+  /** Destroy the low-level instance, dispose the dataset, detach viewer-owned DOM, supersede in-flight work. */
   destroy(): void {
     if (this._destroyed) return;
     this._destroyed = true;
     ++this._revision; // supersede any in-flight open/transition
     this._teardownEngine();
+    this._dataset?.dispose();
+    this._dataset = undefined;
     this._removeOwnedDom();
     this._status = "idle";
     this._error = undefined;
@@ -1771,8 +1773,8 @@ export class Viewer {
 
   // === Translation (§15.5) ===
 
-  private _requireDataset(): ResolvedDataset {
-    if (!this._dataset) throw new Error("No dataset open — call viewer.open(source) first");
+  private _requireDataset(): Dataset {
+    if (!this._dataset) throw new Error("No dataset open — call viewer.open() first");
     return this._dataset;
   }
 
@@ -1847,8 +1849,9 @@ export class Viewer {
     const engine = this._engine;
     if (!engine || mode === "volume") return;
     const dataset = this._requireDataset();
-    const spacing = dataset.physical.spatial.spacing ?? [1, 1, 1];
-    const origin = dataset.physical.spatial.origin ?? [0, 0, 0];
+    const spatial = dataset.physical?.spatial;
+    const spacing = spatial?.spacing ?? [1, 1, 1];
+    const origin = spatial?.origin ?? [0, 0, 0];
     // Slice-layer prefixes with their in-plane axes: the mode name for the
     // main view (layers are `<mode>-cN`), the plane ids in quad.
     const planes: { prefix: string; axes: readonly string[] }[] = mode === "quad"
@@ -1875,7 +1878,7 @@ export class Viewer {
   }
 
   private _fitCamera(mode: ResolvedViewerMode): Camera {
-    const physical = this._requireDataset().physical;
+    const physical = this._requireDataset().physical ?? DEFAULT_PHYSICAL;
     return mode === "slice"
       ? fitSliceCamera([0, 1, 2], physical)
       : frameVolumeCamera(physical);
@@ -1929,46 +1932,25 @@ export class Viewer {
     // open/mode-transition rebuilds by construction.
     const transform = this._modeOverrides[mode]?.transform;
     const physical: PhysicalSpace = {
-      ...dataset.physical,
+      ...(dataset.physical ?? DEFAULT_PHYSICAL),
       channels: { names: channels.map((c) => c.label) },
     };
     const layers: LayerConfig[] = [];
     const views: Record<string, ViewConfig> = {};
 
+    // Default layers come from the dataset kind (DX-M1): it knows how to
+    // stamp its own per-channel volume/slice layers.
     const pushLayers = (prefix: string, kind: ViewKind, axes?: readonly string[]): string[] => {
-      const ids: string[] = [];
-      for (const channel of channels) {
-        const id = `${prefix}-c${channel.index}`;
-        const render: Render = {
-          visible        : channel.visible,
-          color          : channel.color,
-          contrastLimits : [...channel.contrast] as [number, number],
-          // One layer per channel composites fluorescence-style: additive is
-          // the multichannel default for viewer-generated image layers.
-          blending       : "additive",
-          ...(kind === "volume" ? { volumeProjection: this._projection } : {}),
-        };
-        layers.push({
-          id,
-          type : kind,
-          // The dataset's canonical descriptor stays on the layer for
-          // provenance/serialization; the explicit pyramid/fetch win at
-          // runtime (Data precedence), so no per-layer re-resolution happens.
-          data    : {
-            source: dataset.source,
-            pyramid: dataset.pyramid,
-            fetch: dataset.fetch,
-            ...(transform !== undefined ? { transform: [...transform] } : {}),
-          },
-          render,
-          options : {
-            ...(axes ? { axes: [...axes] } : {}),
-            selection: { ...dataset.defaultSelection, c: channel.index },
-          },
-        });
-        ids.push(id);
-      }
-      return ids;
+      const configs = dataset.createDefaultLayers({
+        view   : kind,
+        prefix,
+        axes,
+        channels,
+        ...(kind === "volume" ? { projection: this._projection } : {}),
+        ...(transform !== undefined ? { transform: [...transform] } : {}),
+      });
+      layers.push(...configs);
+      return configs.map((layer) => layer.id);
     };
 
     if (mode === "quad") {
@@ -2212,16 +2194,16 @@ export class Viewer {
  * - Canvas: framework ownership — the Viewer renders into it (`"quad"` mode
  *   is unavailable, it needs to own the layout).
  *
- * With `config.source`, the returned promise resolves only once the dataset
- * is open and ready; resolver failures reject with the actionable cause
- * (DX-M2 semantics). Without a source the viewer starts `idle` — call
- * `await viewer.open(source)`.
+ * With `config.dataset`, the returned promise resolves only once the dataset
+ * is open and ready; load failures reject with the actionable cause
+ * (DX-M2 semantics). Without a dataset the viewer starts `idle` — call
+ * `await viewer.open(config)`.
  */
 export async function createViewer(
   element : string | HTMLElement | HTMLCanvasElement,
   config  : ViewerConfig = {},
 ): Promise<Viewer> {
   const viewer = new Viewer(resolveTarget(element), config);
-  if (config.source) await viewer.open(config.source);
+  if (config.dataset) await viewer.open(config.dataset);
   return viewer;
 }

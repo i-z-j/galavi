@@ -40,8 +40,8 @@ type BlendingMode = NonNullable<Render['blending']>;
  * - `"ready"`   — data is renderable (`isReady` holds).
  * - `"error"`   — a failure was recorded; see {@link BaseLayer.loadError}.
  *
- * `BaseLayer`'s default derives from `isReady`; layers with a failable async
- * source (tiled image layers) override to also report `"idle"` / `"error"`.
+ * `BaseLayer`'s default derives from `isReady`; layers with an optional
+ * source (tiled image layers) override to also report `"idle"`.
  */
 export type LayerLoadStatus = "idle" | "loading" | "ready" | "error";
 
@@ -317,8 +317,8 @@ export abstract class BaseLayer {
 
   /**
    * Coarse load state (DX-M2) — see {@link LayerLoadStatus}. The default
-   * derives from `isReady`; layers with a failable async source (tiled image
-   * layers) override to report `"idle"` / `"error"`.
+   * derives from `isReady`; layers with an optional source (tiled image
+   * layers) override to report `"idle"`.
    */
   get loadStatus(): LayerLoadStatus {
     return this.isReady ? "ready" : "loading";

@@ -57,7 +57,6 @@ export function sourceChanged(
   return (
     next?.url !== prev?.url ||
     next?.urlTemplate !== prev?.urlTemplate ||
-    next?.source !== prev?.source ||
     next?.fetch !== prev?.fetch ||
     next?.pyramid !== prev?.pyramid
   );

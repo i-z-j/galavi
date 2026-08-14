@@ -2,32 +2,34 @@
  * High-level Viewer contract tests (DX-L1/L2/M3/M6).
  *
  * Verifies the §15.5 translation to the low-level scene model headless: a
- * stub dataset resolver (`registerDatasetResolver`) serves synthetic
- * pyramids; a minimal fake WebGPU device + fake canvas let `createViewerEngine`
- * mount real Volume/Slice views without a GPU (rAF is stubbed, so no render
- * pass ever runs — these tests exercise config translation, state, and
- * lifecycle, not pixels).
+ * stub Dataset kind (`registerDataset`) serves synthetic pyramids; a minimal
+ * fake WebGPU device + fake canvas let `createViewerEngine` mount real
+ * Volume/Slice views without a GPU (rAF is stubbed, so no render pass ever
+ * runs — these tests exercise config translation, state, and lifecycle, not
+ * pixels).
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   createViewer,
+  Dataset,
   ViewerEngine,
   getDatasetCapabilities,
-  invalidateAllDatasets,
-  registerDatasetResolver,
+  registerDataset,
   ViewerSupersededError,
-  type ResolvedDataset,
+  type DatasetConfig,
+  type DatasetDefaults,
+  type DefaultLayersOptions,
   type Viewer,
   type ViewerConfig,
 } from "../src/index";
-import { datasetResolverRegistry } from "../src/dataset";
-import type { ImagePyramid, SourceDescriptor } from "../src/types";
+import { datasetRegistry } from "../src/registry";
+import type { ImagePyramid, LayerConfig } from "../src/types";
 
 // ============================================================================
-// STUB DATASET RESOLVER
+// STUB DATASET KIND
 // ============================================================================
 
-const TYPE = "viewer-stub";
+const KIND = "viewer-stub";
 
 const PYRAMID_3D: ImagePyramid = {
   levels: [
@@ -45,33 +47,78 @@ const PYRAMID_STRIDED: ImagePyramid = {
   levels: [{ path: "0", shape: [256, 256, 500], chunkSize: [256, 256, 1], scale: [1, 1, 1] }],
 };
 
-const DESC_3D: SourceDescriptor = { type: TYPE, url: "mem://3d" };
-const DESC_2D: SourceDescriptor = { type: TYPE, url: "mem://2d" };
-const DESC_STRIDED: SourceDescriptor = { type: TYPE, url: "mem://strided" };
-const DESC_ALL_ACTIVE: SourceDescriptor = { type: TYPE, url: "mem://all-active" };
-const DESC_OTHER: SourceDescriptor = { type: TYPE, url: "mem://other" };
-const DESC_FAIL: SourceDescriptor = { type: TYPE, url: "mem://fail" };
+const DESC_3D: DatasetConfig = { type: KIND, source: "mem://3d" };
+const DESC_2D: DatasetConfig = { type: KIND, source: "mem://2d" };
+const DESC_STRIDED: DatasetConfig = { type: KIND, source: "mem://strided" };
+const DESC_ALL_ACTIVE: DatasetConfig = { type: KIND, source: "mem://all-active" };
+const DESC_OTHER: DatasetConfig = { type: KIND, source: "mem://other" };
+const DESC_FAIL: DatasetConfig = { type: KIND, source: "mem://fail" };
 
-function stubDataset(source: SourceDescriptor): ResolvedDataset {
-  const pyramid =
-    source.url === DESC_2D.url ? PYRAMID_2D :
-    source.url === DESC_STRIDED.url ? PYRAMID_STRIDED :
-    PYRAMID_3D;
-  const allActive = source.url === DESC_ALL_ACTIVE.url;
-  return {
-    source,
-    pyramid,
-    fetch: async () => new ArrayBuffer(0),
-    physical: { spatial: { size: [4, 4, 8], unit: "μm", spacing: [0.5, 0.5, 2], origin: [0, 0, 0] } },
-    dimensions: [{ name: "c", size: 2, labels: ["a", "b"] }],
-    defaultSelection: { c: 0 },
-    channels: [
+/**
+ * Stub image dataset: reproduces the image-kind behavior these tests assert
+ * on — fixed channels/physical/dimensions/defaultSelection per fixture URL,
+ * capability-driven auto mode, and per-channel typed layers.
+ */
+class StubImageDataset extends Dataset {
+  pyramid: ImagePyramid = PYRAMID_3D;
+  fetch = async () => new ArrayBuffer(0);
+
+  override async load(): Promise<void> {
+    const source = this.config.source;
+    if (source === DESC_FAIL.source) {
+      const cause = new Error("No OME-Zarr multiscales metadata found");
+      throw Object.assign(new Error(`Failed to open ${source}`), { cause });
+    }
+    this.pyramid =
+      source === DESC_2D.source ? PYRAMID_2D :
+      source === DESC_STRIDED.source ? PYRAMID_STRIDED :
+      PYRAMID_3D;
+    const allActive = source === DESC_ALL_ACTIVE.source;
+    this.physical = { spatial: { size: [4, 4, 8], unit: "μm", spacing: [0.5, 0.5, 2], origin: [0, 0, 0] } };
+    this.dimensions = [{ name: "c", size: 2, labels: ["a", "b"] }];
+    this.defaultSelection = { c: 0 };
+    this.channels = [
       { index: 0, label: "a", color: "#00B0FF", contrast: [0, 1], visible: true },
       { index: 1, label: "b", color: "#FF3D3D", contrast: [0, 1], visible: allActive },
-    ],
-    dtype: "uint8",
-    capabilities: getDatasetCapabilities(pyramid),
-  };
+    ];
+    this.capabilities = getDatasetCapabilities(this.pyramid);
+  }
+
+  override dispose(): void {}
+
+  override deriveDefaults(): DatasetDefaults {
+    const caps = this.capabilities;
+    return {
+      mode      : caps.zDepth > 1 && caps.supports3D && caps.supportsVolumePreview ? "volume" : "slice",
+      selection : { ...this.defaultSelection },
+    };
+  }
+
+  override createDefaultLayers(options: DefaultLayersOptions): LayerConfig[] {
+    const { view, prefix, axes, channels, projection, transform } = options;
+    return channels.map((channel) => ({
+      id   : `${prefix}-c${channel.index}`,
+      type : view,
+      data : {
+        pyramid : this.pyramid,
+        fetch   : this.fetch,
+        ...(transform !== undefined ? { transform: [...transform] } : {}),
+      },
+      render: {
+        visible        : channel.visible,
+        color          : channel.color,
+        contrastLimits : [...channel.contrast] as [number, number],
+        // One layer per channel composites fluorescence-style: additive is
+        // the multichannel default for viewer-generated image layers.
+        blending       : "additive",
+        ...(view === "volume" ? { volumeProjection: projection } : {}),
+      },
+      options: {
+        ...(axes ? { axes: [...axes] } : {}),
+        selection: { ...this.defaultSelection, c: channel.index },
+      },
+    }));
+  }
 }
 
 // ============================================================================
@@ -175,19 +222,12 @@ let viewers: Viewer[];
 beforeEach(() => {
   viewers = [];
   stubWebGPU();
-  registerDatasetResolver(TYPE, async (desc) => {
-    if (desc.url === DESC_FAIL.url) {
-      const cause = new Error("No OME-Zarr multiscales metadata found");
-      throw Object.assign(new Error(`Failed to open ${desc.url}`), { cause });
-    }
-    return stubDataset(desc);
-  });
+  registerDataset(KIND, (config) => new StubImageDataset(config));
 });
 
 afterEach(() => {
   for (const viewer of viewers.splice(0)) viewer.destroy();
-  datasetResolverRegistry.unregister(TYPE);
-  invalidateAllDatasets();
+  datasetRegistry.unregister(KIND);
   vi.unstubAllGlobals();
 });
 
@@ -255,7 +295,7 @@ describe("createViewer target resolution", () => {
 
   test("a passed canvas is used directly and survives destroy", async () => {
     const canvas = makeFakeCanvas();
-    const viewer = await makeViewer(canvas, { source: DESC_3D });
+    const viewer = await makeViewer(canvas, { dataset: DESC_3D });
     expect(viewer.canvas).toBe(canvas);
     viewer.destroy();
     expect(canvas.parentNode).toBeNull(); // never owned, never removed
@@ -268,13 +308,13 @@ describe("createViewer target resolution", () => {
 
 describe("open translation to the low-level scene model", () => {
   test("3D dataset in auto mode → volume view, one typed layer per channel", async () => {
-    const viewer = await makeViewer(makeFakeCanvas(), { source: DESC_3D });
+    const viewer = await makeViewer(makeFakeCanvas(), { dataset: DESC_3D });
     const engine = viewer.engine!;
     expect(engine).toBeInstanceOf(ViewerEngine);
     expect(viewer.status).toBe("ready");
     expect(viewer.resolvedMode).toBe("volume");
     expect(viewer.availableModes).toEqual(["slice", "volume", "quad"]);
-    expect(viewer.dataset?.source).toEqual(DESC_3D);
+    expect(viewer.dataset?.config).toEqual(DESC_3D);
 
     const state = engine.getState();
     // Physical comes from the resolved dataset, with channel names promoted.
@@ -306,7 +346,7 @@ describe("open translation to the low-level scene model", () => {
   });
 
   test("2D dataset in auto mode → slice view and slice layers", async () => {
-    const viewer = await makeViewer(makeFakeCanvas(), { source: DESC_2D });
+    const viewer = await makeViewer(makeFakeCanvas(), { dataset: DESC_2D });
     expect(viewer.resolvedMode).toBe("slice");
     expect(viewer.availableModes).toEqual(["slice"]);
 
@@ -327,7 +367,7 @@ describe("open translation to the low-level scene model", () => {
   });
 
   test("z-chunk=1 pyramid in auto mode → volume via the bounded-preview capability", async () => {
-    const viewer = await makeViewer(makeFakeCanvas(), { source: DESC_STRIDED });
+    const viewer = await makeViewer(makeFakeCanvas(), { dataset: DESC_STRIDED });
     expect(viewer.dataset?.capabilities).toMatchObject({ supports3D: true, supportsVolumePreview: true });
     expect(viewer.resolvedMode).toBe("volume");
     const layer = layerOf(viewer, "volume-c0");
@@ -335,14 +375,14 @@ describe("open translation to the low-level scene model", () => {
   });
 
   test("explicit mode wins over auto resolution", async () => {
-    const viewer = await makeViewer(makeFakeCanvas(), { source: DESC_3D, mode: "slice" });
+    const viewer = await makeViewer(makeFakeCanvas(), { dataset: DESC_3D, mode: "slice" });
     expect(viewer.resolvedMode).toBe("slice");
     expect(viewer.engine!.getViewConfig("main")?.type).toBe("slice");
     expect(layerOf(viewer, "slice-c0").type).toBe("slice");
   });
 
   test("OMERO-active-style all-visible channels are respected", async () => {
-    const viewer = await makeViewer(makeFakeCanvas(), { source: DESC_ALL_ACTIVE });
+    const viewer = await makeViewer(makeFakeCanvas(), { dataset: DESC_ALL_ACTIVE });
     expect(layerOf(viewer, "volume-c0").render?.visible).toBe(true);
     expect(layerOf(viewer, "volume-c1").render?.visible).toBe(true);
   });
@@ -363,7 +403,7 @@ describe("open status semantics", () => {
     expect(viewer.error).toBeUndefined();
   });
 
-  test("open rejects with the resolver error and its cause; status → error", async () => {
+  test("open rejects with the load error and its cause; status → error", async () => {
     const viewer = await makeViewer();
     let rejection: unknown;
     try {
@@ -380,35 +420,35 @@ describe("open status semantics", () => {
     await expect(viewer.ready).rejects.toBe(rejection);
   });
 
-  test("unknown source type rejects with the actionable registry error", async () => {
+  test("unknown dataset kind rejects with the actionable registry error", async () => {
     const viewer = await makeViewer();
-    await expect(viewer.open({ type: "nope", url: "mem://x" })).rejects.toThrow(
-      /Unknown dataset source type: "nope"/,
+    await expect(viewer.open({ type: "nope", source: "mem://x" })).rejects.toThrow(
+      /Unknown dataset kind: "nope"/,
     );
     expect(viewer.status).toBe("error");
   });
 
   test("replacing a dataset is one awaited call; superseded opens never clobber", async () => {
-    const viewer = await makeViewer(makeFakeCanvas(), { source: DESC_3D });
+    const viewer = await makeViewer(makeFakeCanvas(), { dataset: DESC_3D });
     const stale = viewer.open(DESC_2D);
     const fresh = viewer.open(DESC_OTHER); // 3D pyramid, distinct physical? same stub physical
     await expect(stale).rejects.toBeInstanceOf(ViewerSupersededError);
     await fresh;
     expect(viewer.status).toBe("ready");
-    expect(viewer.dataset?.source.url).toBe("mem://other");
+    expect(viewer.dataset?.config.source).toBe("mem://other");
     // The fresher open won: volume mode (3D), not the superseded 2D slice.
     expect(viewer.resolvedMode).toBe("volume");
     expect(viewer.engine!.getViewConfig("main")?.type).toBe("volume");
   });
 
   test("a failed open leaves the previous dataset intact and can be retried", async () => {
-    const viewer = await makeViewer(makeFakeCanvas(), { source: DESC_3D });
+    const viewer = await makeViewer(makeFakeCanvas(), { dataset: DESC_3D });
     await expect(viewer.open(DESC_FAIL)).rejects.toThrow(/Failed to open/);
     expect(viewer.status).toBe("error");
     // Retry with a good source recovers.
     await viewer.open(DESC_OTHER);
     expect(viewer.status).toBe("ready");
-    expect(viewer.dataset?.source.url).toBe("mem://other");
+    expect(viewer.dataset?.config.source).toBe("mem://other");
   });
 });
 
@@ -420,10 +460,10 @@ describe("channel model", () => {
   test("config channels and channel().configure produce identical layers", async () => {
     const patch = { visible: true, color: "ff0000", contrast: [0.2, 0.8] as [number, number] };
     const declarative = await makeViewer(makeFakeCanvas(), {
-      source: DESC_3D,
+      dataset: DESC_3D,
       channels: [{ index: 1, ...patch }],
     });
-    const imperative = await makeViewer(makeFakeCanvas(), { source: DESC_3D });
+    const imperative = await makeViewer(makeFakeCanvas(), { dataset: DESC_3D });
     imperative.channel(1).configure(patch);
 
     const a = layerOf(declarative, "volume-c1");
@@ -436,7 +476,7 @@ describe("channel model", () => {
   });
 
   test("channel().configure maps to every internal layer for that channel", async () => {
-    const viewer = await makeViewer(makeFakeCanvas(), { source: DESC_3D });
+    const viewer = await makeViewer(makeFakeCanvas(), { dataset: DESC_3D });
     viewer.channel(1).configure({ visible: true, contrast: [0.1, 0.4] });
     expect(layerOf(viewer, "volume-c1").render).toMatchObject({ visible: true, contrastLimits: [0.1, 0.4] });
 
@@ -448,7 +488,7 @@ describe("channel model", () => {
   });
 
   test("channel().config and viewer.channels expose the effective state", async () => {
-    const viewer = await makeViewer(makeFakeCanvas(), { source: DESC_3D });
+    const viewer = await makeViewer(makeFakeCanvas(), { dataset: DESC_3D });
     viewer.channel(0).configure({ label: "DAPI" });
     expect(viewer.channel(0).config).toEqual({
       index: 0, label: "DAPI", visible: true, color: "#00B0FF", contrast: [0, 1],
@@ -460,7 +500,7 @@ describe("channel model", () => {
 
   test("channel().configure wins over the active mode override (edit what you see)", async () => {
     const viewer = await makeViewer(makeFakeCanvas(), {
-      source: DESC_3D,
+      dataset: DESC_3D,
       mode: "slice",
       modeOverrides: { slice: { channels: [{ index: 0, contrast: [0, 0.05] }] } },
     });
@@ -474,7 +514,7 @@ describe("channel model", () => {
   });
 
   test("channel index validation is actionable", async () => {
-    const viewer = await makeViewer(makeFakeCanvas(), { source: DESC_3D });
+    const viewer = await makeViewer(makeFakeCanvas(), { dataset: DESC_3D });
     expect(() => viewer.channel(2)).toThrow(/index out of range.*2 channel/);
     expect(() => viewer.channel(0).configure({ color: "red" })).toThrow(/invalid color "red"/);
     const idle = await makeViewer();
@@ -488,13 +528,13 @@ describe("channel model", () => {
 
 describe("projection", () => {
   test("config projection maps to volume layer render.volumeProjection", async () => {
-    const viewer = await makeViewer(makeFakeCanvas(), { source: DESC_3D, projection: "minip" });
+    const viewer = await makeViewer(makeFakeCanvas(), { dataset: DESC_3D, projection: "minip" });
     expect(layerOf(viewer, "volume-c0").render?.volumeProjection).toBe("minip");
     expect(layerOf(viewer, "volume-c1").render?.volumeProjection).toBe("minip");
   });
 
   test("imperative projection updates live volume layers and survives rebuilds", async () => {
-    const viewer = await makeViewer(makeFakeCanvas(), { source: DESC_3D });
+    const viewer = await makeViewer(makeFakeCanvas(), { dataset: DESC_3D });
     viewer.projection = "mean";
     expect(layerOf(viewer, "volume-c0").render?.volumeProjection).toBe("mean");
     viewer.mode = "slice";
@@ -513,7 +553,7 @@ describe("projection", () => {
 
 describe("mode transitions", () => {
   test("slice ↔ volume preserves the physical focus", async () => {
-    const viewer = await makeViewer(makeFakeCanvas(), { source: DESC_3D }); // auto → volume
+    const viewer = await makeViewer(makeFakeCanvas(), { dataset: DESC_3D }); // auto → volume
     viewer.engine!.setTarget([1, 2, 3]);
 
     viewer.mode = "slice";
@@ -529,7 +569,7 @@ describe("mode transitions", () => {
   });
 
   test("rapid flips are last-write-wins and settle on the final mode", async () => {
-    const viewer = await makeViewer(makeFakeCanvas(), { source: DESC_3D }); // volume
+    const viewer = await makeViewer(makeFakeCanvas(), { dataset: DESC_3D }); // volume
     viewer.mode = "slice";
     viewer.mode = "volume";
     viewer.mode = "slice";
@@ -548,7 +588,7 @@ describe("mode transitions", () => {
   });
 
   test("an invalid mode throws synchronously", async () => {
-    const viewer = await makeViewer(makeFakeCanvas(), { source: DESC_3D });
+    const viewer = await makeViewer(makeFakeCanvas(), { dataset: DESC_3D });
     expect(() => { viewer.mode = "grid" as never; }).toThrow(/Invalid viewer mode/);
   });
 });
@@ -559,7 +599,7 @@ describe("mode transitions", () => {
 
 describe("slice navigation (setSlicePoint)", () => {
   test("setSlicePoint moves every slice layer and the camera focus", async () => {
-    const viewer = await makeViewer(makeFakeCanvas(), { source: DESC_3D, mode: "slice" });
+    const viewer = await makeViewer(makeFakeCanvas(), { dataset: DESC_3D, mode: "slice" });
     // physical z=6 with spacing 2 → slice index 3 (shape z=4 → 0..3).
     viewer.setSlicePoint([2, 2, 6]);
     expect(layerOf(viewer, "slice-c0").options).toMatchObject({ sliceIndex: 3 });
@@ -569,7 +609,7 @@ describe("slice navigation (setSlicePoint)", () => {
 
   test("quad mode syncs each plane along its own through axis", async () => {
     const { container } = makeFakeContainer();
-    const viewer = await makeViewer(container, { source: DESC_3D, mode: "quad" });
+    const viewer = await makeViewer(container, { dataset: DESC_3D, mode: "quad" });
     viewer.setSlicePoint([1, 2, 6]); // spacing [0.5, 0.5, 2]
     expect(layerOf(viewer, "quad-xy-c0").options).toMatchObject({ sliceIndex: 3 }); // through z
     expect(layerOf(viewer, "quad-xz-c0").options).toMatchObject({ sliceIndex: 4 }); // through y
@@ -577,7 +617,7 @@ describe("slice navigation (setSlicePoint)", () => {
   });
 
   test("entering slice mode with a preserved focus shows the slice at the focus", async () => {
-    const viewer = await makeViewer(makeFakeCanvas(), { source: DESC_3D }); // auto → volume
+    const viewer = await makeViewer(makeFakeCanvas(), { dataset: DESC_3D }); // auto → volume
     viewer.engine!.setTarget([1, 2, 6]);
     viewer.mode = "slice";
     await viewer.ready;
@@ -586,7 +626,7 @@ describe("slice navigation (setSlicePoint)", () => {
   });
 
   test("setSlicePoint is a no-op in volume mode", async () => {
-    const viewer = await makeViewer(makeFakeCanvas(), { source: DESC_3D }); // auto → volume
+    const viewer = await makeViewer(makeFakeCanvas(), { dataset: DESC_3D }); // auto → volume
     const before = viewer.engine!.getState().exploration.camera.target;
     viewer.setSlicePoint([0, 0, 0]);
     expect(viewer.engine!.getState().exploration.camera.target).toEqual(before);
@@ -600,7 +640,7 @@ describe("slice navigation (setSlicePoint)", () => {
 describe("modeOverrides", () => {
   test("per-mode channels/tools/controls apply on mode entry only", async () => {
     const viewer = await makeViewer(makeFakeCanvas(), {
-      source: DESC_3D,
+      dataset: DESC_3D,
       mode: "slice",
       modeOverrides: {
         volume: {
@@ -632,7 +672,7 @@ describe("modeOverrides", () => {
   });
 
   test("viewer.view(mode).configure is the imperative equivalent", async () => {
-    const viewer = await makeViewer(makeFakeCanvas(), { source: DESC_3D, mode: "slice" });
+    const viewer = await makeViewer(makeFakeCanvas(), { dataset: DESC_3D, mode: "slice" });
     viewer.view("volume").configure({ channels: [{ index: 0, contrast: [0.3, 0.7] }] });
 
     viewer.mode = "volume";
@@ -647,7 +687,7 @@ describe("modeOverrides", () => {
 
   test('mode override camera: "fit" forces a re-fit, explicit target wins over focus', async () => {
     const viewer = await makeViewer(makeFakeCanvas(), {
-      source: DESC_3D,
+      dataset: DESC_3D,
       mode: "slice",
       modeOverrides: { volume: { camera: { target: [9, 9, 9] } } },
     });
@@ -666,7 +706,7 @@ describe("modeOverrides", () => {
       0, 0, 4, 1,
     ];
     const viewer = await makeViewer(makeFakeCanvas(), {
-      source: DESC_3D,
+      dataset: DESC_3D,
       mode: "volume",
       modeOverrides: { volume: { transform: affine } },
     });
@@ -709,7 +749,7 @@ describe("modeOverrides", () => {
 
   test("view(mode).configure({ transform }) is the imperative equivalent", async () => {
     const affine = [2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1];
-    const viewer = await makeViewer(makeFakeCanvas(), { source: DESC_3D, mode: "volume" });
+    const viewer = await makeViewer(makeFakeCanvas(), { dataset: DESC_3D, mode: "volume" });
     // Configuring the ACTIVE mode re-enters it immediately with the transform.
     viewer.view("volume").configure({ transform: affine });
     await viewer.ready;
@@ -725,11 +765,11 @@ describe("modeOverrides", () => {
   test("mode override transform validation is actionable", async () => {
     const canvas = makeFakeCanvas();
     await expect(makeViewer(canvas, {
-      source: DESC_3D,
+      dataset: DESC_3D,
       modeOverrides: { volume: { transform: [1, 0, 0] } },
     })).rejects.toThrow(/modeOverrides\.volume\.transform must be an array of 16 finite numbers/);
     await expect(makeViewer(canvas, {
-      source: DESC_3D,
+      dataset: DESC_3D,
       modeOverrides: { volume: { transform: new Array(16).fill(NaN) } },
     })).rejects.toThrow(/modeOverrides\.volume\.transform must be an array of 16 finite numbers/);
   });
@@ -742,18 +782,18 @@ describe("modeOverrides", () => {
 describe("controls and tools runtime parity", () => {
   test("declarative controls land in the view config; defaults follow the mode", async () => {
     const custom = await makeViewer(makeFakeCanvas(), {
-      source: DESC_3D,
+      dataset: DESC_3D,
       controls: { orbit: { zoomSensitivity: 1.4 } },
     });
     expect(custom.engine!.getViewConfig("main")?.controls).toEqual({ orbit: { zoomSensitivity: 1.4 } });
 
-    const off = await makeViewer(makeFakeCanvas(), { source: DESC_3D, controls: {} });
+    const off = await makeViewer(makeFakeCanvas(), { dataset: DESC_3D, controls: {} });
     expect(off.engine!.getViewConfig("main")?.controls).toEqual({});
     expect(controlTypes(off)).toEqual([]);
   });
 
   test("control().configure/enable rebuild the live control chain with typed options", async () => {
-    const viewer = await makeViewer(makeFakeCanvas(), { source: DESC_3D }); // volume → orbit default
+    const viewer = await makeViewer(makeFakeCanvas(), { dataset: DESC_3D }); // volume → orbit default
     expect(viewer.control("orbit").enabled).toBe(true);
     expect(viewer.control("panzoom").enabled).toBe(false);
     expect(controlTypes(viewer)).toEqual(["orbit"]);
@@ -778,7 +818,7 @@ describe("controls and tools runtime parity", () => {
 
   test("declarative tools expand to typed overlay configs", async () => {
     const viewer = await makeViewer(makeFakeCanvas(), {
-      source: DESC_3D,
+      dataset: DESC_3D,
       tools: { crosshair: true, ruler: { visible: false }, magnifier: "2d" },
     });
     expect(viewer.engine!.getViewConfig("main")?.overlays).toEqual({
@@ -793,7 +833,7 @@ describe("controls and tools runtime parity", () => {
   });
 
   test("tool().configure/enable attach, update, and detach live overlays", async () => {
-    const viewer = await makeViewer(makeFakeCanvas(), { source: DESC_3D, mode: "slice" });
+    const viewer = await makeViewer(makeFakeCanvas(), { dataset: DESC_3D, mode: "slice" });
     expect(viewer.tool("ruler").enabled).toBe(false);
     expect(liveOverlays(viewer)).toHaveLength(0);
 
@@ -833,11 +873,11 @@ describe("controls and tools runtime parity", () => {
   });
 
   test("magnifier dimension defaults to the view kind when unpinned", async () => {
-    const volumeViewer = await makeViewer(makeFakeCanvas(), { source: DESC_3D, tools: { magnifier: {} } });
+    const volumeViewer = await makeViewer(makeFakeCanvas(), { dataset: DESC_3D, tools: { magnifier: {} } });
     expect(volumeViewer.engine!.getViewConfig("main")?.overlays).toEqual({ "magnifier-3d": {} });
 
     const sliceViewer = await makeViewer(makeFakeCanvas(), {
-      source: DESC_3D,
+      dataset: DESC_3D,
       mode: "slice",
       tools: { magnifier: { zoom: 6 } },
     });
@@ -845,7 +885,7 @@ describe("controls and tools runtime parity", () => {
 
     // A bare `true` is outside the schema (a dimension pin or options bag is required).
     await expect(
-      makeViewer(makeFakeCanvas(), { source: DESC_3D, tools: { magnifier: true as never } }),
+      makeViewer(makeFakeCanvas(), { dataset: DESC_3D, tools: { magnifier: true as never } }),
     ).rejects.toThrow(/tools\.magnifier/);
   });
 });
@@ -856,11 +896,11 @@ describe("controls and tools runtime parity", () => {
 
 describe("camera", () => {
   test('config camera "fit" uses the dataset bounds; partials merge over fit', async () => {
-    const fit = await makeViewer(makeFakeCanvas(), { source: DESC_3D });
+    const fit = await makeViewer(makeFakeCanvas(), { dataset: DESC_3D });
     expect(fit.engine!.getState().exploration.camera.target).toEqual([2, 2, 4]);
 
     const partial = await makeViewer(makeFakeCanvas(), {
-      source: DESC_3D,
+      dataset: DESC_3D,
       camera: { target: [1, 1, 1], projMode: "orthographic" },
     });
     const cam = partial.engine!.getState().exploration.camera;
@@ -870,7 +910,7 @@ describe("camera", () => {
   });
 
   test("setCamera merges over the current camera; fitCamera reframes", async () => {
-    const viewer = await makeViewer(makeFakeCanvas(), { source: DESC_3D });
+    const viewer = await makeViewer(makeFakeCanvas(), { dataset: DESC_3D });
     viewer.setCamera({ target: [3, 3, 3] });
     expect(viewer.engine!.getState().exploration.camera.target).toEqual([3, 3, 3]);
     viewer.setCamera("fit");
@@ -888,7 +928,7 @@ describe("camera", () => {
 describe("quad mode", () => {
   test("container target lays out three slice planes plus a volume view", async () => {
     const { container, el } = makeFakeContainer();
-    const viewer = await makeViewer(container, { source: DESC_3D, mode: "quad" });
+    const viewer = await makeViewer(container, { dataset: DESC_3D, mode: "quad" });
     expect(viewer.resolvedMode).toBe("quad");
 
     const engine = viewer.engine!;
@@ -913,7 +953,7 @@ describe("quad mode", () => {
   });
 
   test("a user-passed canvas rejects quad with an actionable error", async () => {
-    await expect(makeViewer(makeFakeCanvas(), { source: DESC_3D, mode: "quad" })).rejects.toThrow(
+    await expect(makeViewer(makeFakeCanvas(), { dataset: DESC_3D, mode: "quad" })).rejects.toThrow(
       /quad.*requires a container element/,
     );
   });
@@ -926,7 +966,7 @@ describe("quad mode", () => {
 describe("serialization", () => {
   test("ViewerConfig is JSON-serializable and round-trips", async () => {
     const config: ViewerConfig = {
-      source: DESC_3D,
+      dataset: DESC_3D,
       mode: "auto",
       channels: [{ index: 1, visible: true, color: "#00FF00", contrast: [0.2, 0.8] }],
       projection: "minip",
@@ -940,13 +980,13 @@ describe("serialization", () => {
     const viewer = await makeViewer(makeFakeCanvas(), config);
     const emitted = viewer.config;
     expect(JSON.parse(JSON.stringify(emitted))).toEqual(emitted);
-    expect(emitted.source).toEqual(DESC_3D);
+    expect(emitted.dataset).toEqual(DESC_3D);
     expect(emitted.channels).toHaveLength(2);
     expect(emitted.projection).toBe("minip");
   });
 
   test("viewer.config reflects imperative changes (parity mirror)", async () => {
-    const viewer = await makeViewer(makeFakeCanvas(), { source: DESC_3D });
+    const viewer = await makeViewer(makeFakeCanvas(), { dataset: DESC_3D });
     viewer.channel(1).configure({ visible: true, contrast: [0.1, 0.2] });
     viewer.projection = "mean";
     const emitted = viewer.config;
@@ -975,7 +1015,7 @@ describe("escape hatch and teardown", () => {
   });
 
   test("destroy tears down; further operations reject", async () => {
-    const viewer = await makeViewer(makeFakeCanvas(), { source: DESC_3D });
+    const viewer = await makeViewer(makeFakeCanvas(), { dataset: DESC_3D });
     viewer.destroy();
     expect(viewer.engine).toBeUndefined();
     expect(viewer.status).toBe("idle");
@@ -992,7 +1032,7 @@ describe("escape hatch and teardown", () => {
 describe("theme, autoRotate, and channel compositing", () => {
   test("config.theme is forwarded to createViewerEngine (overlays resolve it)", async () => {
     const viewer = await makeViewer(makeFakeCanvas(), {
-      source: DESC_3D,
+      dataset: DESC_3D,
       theme: { accent: "#123456" },
     });
     expect(viewer.engine!.theme.accent).toBe("#123456");
@@ -1004,7 +1044,7 @@ describe("theme, autoRotate, and channel compositing", () => {
 
   test("config.autoRotate lands on volume view configs only", async () => {
     const viewer = await makeViewer(makeFakeCanvas(), {
-      source: DESC_3D,
+      dataset: DESC_3D,
       autoRotate: { speedDegPerSec: 8 },
     });
     expect(viewer.engine!.getViewConfig("main")?.autoRotate).toEqual({ speedDegPerSec: 8 });
@@ -1014,7 +1054,7 @@ describe("theme, autoRotate, and channel compositing", () => {
   });
 
   test("autoRotate is off by default and validates its options bag", async () => {
-    const viewer = await makeViewer(makeFakeCanvas(), { source: DESC_3D });
+    const viewer = await makeViewer(makeFakeCanvas(), { dataset: DESC_3D });
     expect(viewer.engine!.getViewConfig("main")?.autoRotate).toBeUndefined();
     await expect(
       makeViewer(makeFakeCanvas(), { autoRotate: { speedDegPerSec: Number.NaN } }),
@@ -1022,7 +1062,7 @@ describe("theme, autoRotate, and channel compositing", () => {
   });
 
   test("generated channel layers composite additively (multichannel default)", async () => {
-    const viewer = await makeViewer(makeFakeCanvas(), { source: DESC_3D });
+    const viewer = await makeViewer(makeFakeCanvas(), { dataset: DESC_3D });
     expect(layerOf(viewer, "volume-c0").render?.blending).toBe("additive");
     expect(layerOf(viewer, "volume-c1").render?.blending).toBe("additive");
     viewer.mode = "slice";

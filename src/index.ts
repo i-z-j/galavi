@@ -28,7 +28,6 @@ export type {
   TemporalConfig,
   ChannelConfig,
   Data,
-  SourceDescriptor,
   ImagePyramid,
   ImagePyramidLevel,
   ViewResolution,
@@ -51,11 +50,10 @@ export {
   registerOverlay,
   registerLayer,
   registerView,
-  registerSource,
+  registerDataset,
 } from "./registry";
 export type {
-  ResolvedSource,
-  SourceFactory,
+  DatasetFactory,
 } from "./registry";
 
 // === High-level Viewer facade (DX-L1/L2/M3/M6) ===
@@ -93,25 +91,23 @@ export type {
   ViewerViewAccessor,
 } from "./viewer";
 
-// === Dataset resolution (DX-M1) ===
-// Format-neutral resolved-dataset contract, resolved once per source identity
-// and shared across layers. Layers OVER the per-layer Data.source registry;
-// adapters register resolvers via registerDatasetResolver (their registration
-// entry points, e.g. registerOMEZarrSource(), do both).
+// === Dataset building block ===
+// One dataset/session abstraction: kinds register via registerDataset (the
+// single dataset/source extension point); openDataset constructs and loads a
+// fresh Dataset per call. Image kinds (e.g. "image" / OME-Zarr) live outside
+// the core package.
 export {
+  Dataset,
   openDataset,
-  invalidateDataset,
-  invalidateAllDatasets,
-  registerDatasetResolver,
-  datasetCacheKey,
   getDatasetCapabilities,
 } from "./dataset";
 export type {
-  ResolvedDataset,
-  ResolvedChannel,
+  DatasetConfig,
+  DatasetChannel,
   DatasetDimension,
   DatasetCapabilities,
-  DatasetResolver,
+  DatasetDefaults,
+  DefaultLayersOptions,
 } from "./dataset";
 
 export { BaseControl } from "./control";
