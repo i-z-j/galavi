@@ -20,6 +20,10 @@ export type {
   DefaultLayersOptions,
 } from "./base";
 
+// Core dataset kinds — the eager import chain that self-registers them.
+// Never import `./ome-zarr` here (it lives outside the core package).
+export { MeshDataset } from "./mesh";
+
 /**
  * Kinds that live outside the core package: the unknown-kind error names the
  * import that provides them.

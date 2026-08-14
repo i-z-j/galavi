@@ -98,7 +98,7 @@ describe("openDataset", () => {
   test("rejects with an actionable error for an unknown kind", async () => {
     registerDataset(KIND, (config) => new StubDataset(config));
     await expect(openDataset({ type: "nope", source: "mem://x" })).rejects.toThrow(
-      /Unknown dataset kind: "nope" \(registered: fake-dataset\)\. Register a dataset kind first via registerDataset\(\)\./,
+      /Unknown dataset kind: "nope" \(registered: [^)]*fake-dataset[^)]*\)\. Register a dataset kind first via registerDataset\(\)\./,
     );
   });
 

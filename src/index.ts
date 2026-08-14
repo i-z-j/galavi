@@ -98,6 +98,7 @@ export type {
 // the core package.
 export {
   Dataset,
+  MeshDataset,
   openDataset,
   getDatasetCapabilities,
 } from "./dataset";
