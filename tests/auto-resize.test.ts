@@ -8,7 +8,7 @@
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { State } from "../src/types";
-import type { Galavi } from "../src/main";
+import type { ViewerEngine } from "../src/viewer";
 import { BaseView } from "../src/view";
 
 class TestView extends BaseView {
@@ -80,7 +80,7 @@ describe("BaseView canvas auto-resize", () => {
   async function mountView(autoResize = true) {
     const view = new TestView("v1");
     view.autoResize = autoResize;
-    view.setOwner({ requestRender } as unknown as Galavi);
+    view.setOwner({ requestRender } as unknown as ViewerEngine);
     view.setDevice({} as GPUDevice);
     const canvas = makeCanvas(100, 50);
     await view.mount(canvas);

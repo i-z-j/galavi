@@ -65,7 +65,7 @@ export class VolumeView extends BaseView {
       useDepth            : true,
       paramsMinSize       : 80,
       rewriteNonTiledVerts: false,
-      requestRender       : () => this.galavi?.requestRender(),
+      requestRender       : () => this.engine?.requestRender(),
     });
 
     this.registerDOMEvents();
@@ -162,9 +162,9 @@ export class VolumeView extends BaseView {
   override forward(action: { type: string; payload?: unknown }): void {
     if (action.type === "key:down") {
       const { code } = action.payload as { code: string };
-      if (code === "KeyF" && this.galavi) {
-        const mode = this.galavi.getState().exploration.camera.navMode;
-        this.galavi.setNavMode(mode === "fly" ? "orbit" : "fly");
+      if (code === "KeyF" && this.engine) {
+        const mode = this.engine.getState().exploration.camera.navMode;
+        this.engine.setNavMode(mode === "fly" ? "orbit" : "fly");
         return;
       }
     }
@@ -224,7 +224,7 @@ export class VolumeView extends BaseView {
     };
 
     if (rawT < 1) {
-      requestAnimationFrame(() => this.galavi?.requestRender());
+      requestAnimationFrame(() => this.engine?.requestRender());
     } else {
       this.modeTransition = undefined;
     }

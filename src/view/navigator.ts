@@ -46,7 +46,7 @@ export class NavigatorView extends BaseView {
       useDepth            : true,
       paramsMinSize       : 48,
       rewriteNonTiledVerts: false,
-      requestRender       : () => this.galavi?.requestRender(),
+      requestRender       : () => this.engine?.requestRender(),
     });
 
     // Navigator is passive — no DOM event handlers.

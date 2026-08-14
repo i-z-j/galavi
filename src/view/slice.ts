@@ -63,7 +63,7 @@ export class SliceView extends BaseView {
       useDepth            : false,
       paramsMinSize       : 48,
       rewriteNonTiledVerts: true,
-      requestRender       : () => this.galavi?.requestRender(),
+      requestRender       : () => this.engine?.requestRender(),
     });
 
     this.registerDOMEvents();

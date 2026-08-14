@@ -422,7 +422,7 @@ export abstract class BaseLayer {
    *
    * Skips work when both `desc` and `physical` are reference-equal to the
    * previous call — render-only triggers (e.g. tile uploads via
-   * `Galavi.requestRender()`) reuse the same state refs and need no re-apply.
+   * `ViewerEngine.requestRender()`) reuse the same state refs and need no re-apply.
    *
    * G1 invariant: `applyDataSource` must call `setSource(desc.data)` exactly
    * once when `desc.data` is present. Re-fetch is prevented downstream by

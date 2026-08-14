@@ -10,14 +10,14 @@
  * `State` document and does not round-trip through `getState()`.
  *
  * Theming: overlays render with the resolved galavi theme. `BaseOverlay`
- * resolves the theme (global `GalaviConfig.theme` merged with the per-overlay
+ * resolves the theme (global `ViewerEngineConfig.theme` merged with the per-overlay
  * `theme` option, over the neutral `DEFAULT_THEME`) and writes it as
  * `--galavi-*` CSS custom properties on the overlay root; inline styles
  * reference `var(--galavi-*)`.
  */
 
 import type { State, Vec2, Vec3 } from "../types";
-import type { Galavi } from "../main";
+import type { ViewerEngine } from "../viewer";
 import type { AxisMap } from "../utils/axes";
 import {
   applyThemeTo,
@@ -34,7 +34,7 @@ type OverlayBinding = {
   isActive()    : boolean;
   getAxisMap()  : AxisMap | undefined;
   getTheme()    : GalaviTheme;
-  getOwner()    : Galavi | undefined;
+  getOwner()    : ViewerEngine | undefined;
   projectPhysicalToScreen?(position: Vec3): Vec2 | null | undefined;
 };
 
@@ -188,8 +188,8 @@ export abstract class BaseOverlay {
     return this.binding?.getAxisMap();
   }
 
-  /** The Galavi instance owning the bound view (e.g. for follow views). */
-  protected getOwner(): Galavi | undefined {
+  /** The ViewerEngine instance owning the bound view (e.g. for follow views). */
+  protected getOwner(): ViewerEngine | undefined {
     return this.binding?.getOwner();
   }
 

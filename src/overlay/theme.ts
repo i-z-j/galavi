@@ -2,7 +2,7 @@
  * Galavi Theme — unified visual theme for overlays and apps.
  *
  * The theme is a plain data object. Overlays receive it through
- * `OverlayBinding.getTheme()` (resolved from `GalaviConfig.theme`) and MAY
+ * `OverlayBinding.getTheme()` (resolved from `ViewerEngineConfig.theme`) and MAY
  * override parts of it via their `theme` option. `BaseOverlay` writes the
  * resolved theme as `--galavi-*` CSS custom properties on its root element;
  * overlay inline styles reference `var(--galavi-*)`, so restyling never

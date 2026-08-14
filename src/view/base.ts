@@ -20,7 +20,7 @@ import type {
   Vec3,
   ViewResolution,
 } from "../types";
-import type { Galavi } from "../main";
+import type { ViewerEngine } from "../viewer";
 import {
   normalizeWheel,
   normalizeDrag,
@@ -98,7 +98,7 @@ export abstract class BaseView {
   protected device!: GPUDevice;
   protected context!: GPUCanvasContext;
   private canvasFormat!: GPUTextureFormat;
-  protected galavi?: Galavi;
+  protected engine?: ViewerEngine;
   protected layerEntries: BaseLayer[] = [];
   protected overlays: BaseOverlay[] = [];
   private localControls: BaseControl[] = [];
@@ -133,8 +133,8 @@ export abstract class BaseView {
     getCanvas: () => this.canvas,
     isActive: () => this.isActive,
     getAxisMap: () => this.getAxisMap(),
-    getTheme: () => this.galavi?.theme ?? DEFAULT_THEME,
-    getOwner: () => this.galavi,
+    getTheme: () => this.engine?.theme ?? DEFAULT_THEME,
+    getOwner: () => this.engine,
     projectPhysicalToScreen: (position: Vec3) => this.projectPhysicalToScreen(position),
   };
 
@@ -397,7 +397,7 @@ export abstract class BaseView {
   private wireLayer(layer: BaseLayer): void {
     layer.attach({
       requestRender: () => {
-        this.galavi?.requestRender();
+        this.engine?.requestRender();
         this.notifyLayerSignal(layer);
       },
     });
@@ -408,7 +408,7 @@ export abstract class BaseView {
     if (!this.device) return;
     void layer.initAsync().then(() => {
       this.onLayersChanged();
-      this.galavi?.requestRender();
+      this.engine?.requestRender();
       this.notifyLayerSignal(layer);
     });
   }
@@ -704,7 +704,7 @@ export abstract class BaseView {
     if (typeof ResizeObserver === "undefined") return;
     this.resizeObserver = new ResizeObserver(() => {
       if (this.resizeCanvasToDisplaySize()) this.onViewportChanged();
-      this.galavi?.requestRender();
+      this.engine?.requestRender();
     });
     this.resizeObserver.observe(canvas);
   }
@@ -737,9 +737,9 @@ export abstract class BaseView {
     return state;
   }
 
-  /** Bind this view to its owning Galavi instance (used for `requestRender`). */
-  setOwner(galavi: Galavi): void {
-    this.galavi = galavi;
+  /** Bind this view to its owning ViewerEngine instance (used for `requestRender`). */
+  setOwner(engine: ViewerEngine): void {
+    this.engine = engine;
   }
 
   // === Event Handling ===
@@ -768,7 +768,7 @@ export abstract class BaseView {
 
   private _handleMouseDown(e: Event): void {
     // First user input stops auto-rotate permanently.
-    this.galavi?.stopAutoRotate();
+    this.engine?.stopAutoRotate();
 
     const event = e as MouseEvent;
     this._dragging = true;
@@ -856,7 +856,7 @@ export abstract class BaseView {
     if (event.repeat) return;
 
     // First user input stops auto-rotate permanently.
-    this.galavi?.stopAutoRotate();
+    this.engine?.stopAutoRotate();
 
     this._pressedKeys.add(event.code);
 
@@ -944,9 +944,9 @@ export abstract class BaseView {
   }
 
   forward(action: Action): void {
-    if (!this.galavi || this.localControls.length === 0) return;
+    if (!this.engine || this.localControls.length === 0) return;
 
-    const initial = this.galavi.getState();
+    const initial = this.engine.getState();
     const activeNavMode = initial.exploration.camera.navMode;
     let state = initial;
 
@@ -961,7 +961,7 @@ export abstract class BaseView {
     if (state === initial) return;
 
     state = this.clampState(state);
-    this.galavi.setState(state);
+    this.engine.setState(state);
   }
 
   // === Getters ===

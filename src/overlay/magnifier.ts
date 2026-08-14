@@ -26,7 +26,7 @@ import {
   DEFAULT_CAMERA_TARGET,
   DEFAULT_FOV,
 } from "../defaults";
-import { createGalavi, type Galavi } from "../main";
+import type { ViewerEngine } from "../viewer";
 import { BaseOverlay } from "./base";
 import { SVG_NS, clamp, createFullscreenSvg, physicalBounds } from "./utils";
 
@@ -360,7 +360,7 @@ export class MagnifierOverlay extends BaseOverlay {
   private channelPanel?: HTMLDivElement;
   private channelTab?: HTMLButtonElement;
   private channelPanelOpen = true;
-  private nested?: Galavi;
+  private nested?: ViewerEngine;
   private nestedMounting = false;
   private mountToken = 0;
   private mountedLayerIds: string[] = [];
@@ -774,9 +774,15 @@ export class MagnifierOverlay extends BaseOverlay {
       const nestedState: State = prepared ? { ...initial, layers: prepared.layers } : initial;
       if (prepared) this.seedCamera3d(nestedState, prepared.reference);
       else this.applyCamera2d(nestedState);
-      let instance: Galavi;
+      let instance: ViewerEngine;
       try {
-        instance = await createGalavi({
+        // Lazy: a static value import would close a module cycle
+        // (registry → magnifier → viewer → dataset → registry) and hit
+        // dataset.ts's top-level `new Registry()` before registry.ts
+        // finishes initializing. `../viewer` is already in the main chunk
+        // via the package entry, so this adds no split chunk.
+        const { createViewerEngine } = await import("../viewer");
+        instance = await createViewerEngine({
           state: nestedState,
           theme: owner.theme,
           views: {

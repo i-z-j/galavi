@@ -3,7 +3,7 @@
  *
  * Verifies the §15.5 translation to the low-level scene model headless: a
  * stub dataset resolver (`registerDatasetResolver`) serves synthetic
- * pyramids; a minimal fake WebGPU device + fake canvas let `createGalavi`
+ * pyramids; a minimal fake WebGPU device + fake canvas let `createViewerEngine`
  * mount real Volume/Slice views without a GPU (rAF is stubbed, so no render
  * pass ever runs — these tests exercise config translation, state, and
  * lifecycle, not pixels).
@@ -11,7 +11,7 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   createViewer,
-  Galavi,
+  ViewerEngine,
   getDatasetCapabilities,
   invalidateAllDatasets,
   registerDatasetResolver,
@@ -201,21 +201,21 @@ async function makeViewer(
 }
 
 function layerOf(viewer: Viewer, id: string) {
-  const layer = viewer.galavi!.getState().layers.find((l) => l.id === id);
+  const layer = viewer.engine!.getState().layers.find((l) => l.id === id);
   expect(layer, `layer "${id}"`).toBeDefined();
   return layer!;
 }
 
 function overlayKeys(viewer: Viewer, viewId = "main"): string[] {
-  return Object.keys(viewer.galavi!.getViewConfig(viewId)?.overlays ?? {});
+  return Object.keys(viewer.engine!.getViewConfig(viewId)?.overlays ?? {});
 }
 
 function liveOverlays(viewer: Viewer, viewId = "main"): readonly unknown[] {
-  return viewer.galavi!.view(viewId).base.getOverlays();
+  return viewer.engine!.view(viewId).base.getOverlays();
 }
 
 function controlTypes(viewer: Viewer, viewId = "main"): string[] {
-  return viewer.galavi!.view(viewId).base.getControls().map(
+  return viewer.engine!.view(viewId).base.getControls().map(
     (c) => (c.constructor as unknown as { controlType: string }).controlType,
   );
 }
@@ -269,14 +269,14 @@ describe("createViewer target resolution", () => {
 describe("open translation to the low-level scene model", () => {
   test("3D dataset in auto mode → volume view, one typed layer per channel", async () => {
     const viewer = await makeViewer(makeFakeCanvas(), { source: DESC_3D });
-    const galavi = viewer.galavi!;
-    expect(galavi).toBeInstanceOf(Galavi);
+    const engine = viewer.engine!;
+    expect(engine).toBeInstanceOf(ViewerEngine);
     expect(viewer.status).toBe("ready");
     expect(viewer.resolvedMode).toBe("volume");
     expect(viewer.availableModes).toEqual(["slice", "volume", "quad"]);
     expect(viewer.dataset?.source).toEqual(DESC_3D);
 
-    const state = galavi.getState();
+    const state = engine.getState();
     // Physical comes from the resolved dataset, with channel names promoted.
     expect(state.physical?.spatial.size).toEqual([4, 4, 8]);
     expect(state.physical?.spatial.unit).toBe("μm");
@@ -295,14 +295,14 @@ describe("open translation to the low-level scene model", () => {
     expect(state.layers[1].render).toMatchObject({ visible: false, color: "#FF3D3D" });
 
     // The view binds the canvas, the layer ids, and the mode-default control.
-    const view = galavi.getViewConfig("main")!;
+    const view = engine.getViewConfig("main")!;
     expect(view.type).toBe("volume");
     expect(view.layers).toEqual(["volume-c0", "volume-c1"]);
     expect(view.controls).toEqual({ orbit: {} });
     expect(view.overlays).toEqual({});
 
     // Fit camera frames the dataset bounds (center of the physical box).
-    expect(galavi.getState().exploration.camera.target).toEqual([2, 2, 4]);
+    expect(engine.getState().exploration.camera.target).toEqual([2, 2, 4]);
   });
 
   test("2D dataset in auto mode → slice view and slice layers", async () => {
@@ -310,13 +310,13 @@ describe("open translation to the low-level scene model", () => {
     expect(viewer.resolvedMode).toBe("slice");
     expect(viewer.availableModes).toEqual(["slice"]);
 
-    const state = viewer.galavi!.getState();
+    const state = viewer.engine!.getState();
     expect(state.layers.map((l) => l.id)).toEqual(["slice-c0", "slice-c1"]);
     expect(state.layers[0].type).toBe("slice");
     expect(state.layers[0].options?.selection).toEqual({ c: 0 });
     expect(state.layers[0].render?.volumeProjection).toBeUndefined();
 
-    const view = viewer.galavi!.getViewConfig("main")!;
+    const view = viewer.engine!.getViewConfig("main")!;
     expect(view.type).toBe("slice");
     expect(view.controls).toEqual({ panzoom: {} });
 
@@ -337,7 +337,7 @@ describe("open translation to the low-level scene model", () => {
   test("explicit mode wins over auto resolution", async () => {
     const viewer = await makeViewer(makeFakeCanvas(), { source: DESC_3D, mode: "slice" });
     expect(viewer.resolvedMode).toBe("slice");
-    expect(viewer.galavi!.getViewConfig("main")?.type).toBe("slice");
+    expect(viewer.engine!.getViewConfig("main")?.type).toBe("slice");
     expect(layerOf(viewer, "slice-c0").type).toBe("slice");
   });
 
@@ -398,7 +398,7 @@ describe("open status semantics", () => {
     expect(viewer.dataset?.source.url).toBe("mem://other");
     // The fresher open won: volume mode (3D), not the superseded 2D slice.
     expect(viewer.resolvedMode).toBe("volume");
-    expect(viewer.galavi!.getViewConfig("main")?.type).toBe("volume");
+    expect(viewer.engine!.getViewConfig("main")?.type).toBe("volume");
   });
 
   test("a failed open leaves the previous dataset intact and can be retried", async () => {
@@ -455,7 +455,7 @@ describe("channel model", () => {
     });
     expect(viewer.channels.map((c) => c.label)).toEqual(["DAPI", "b"]);
     // Labels reach the shared physical channel names.
-    expect(viewer.galavi!.getState().physical?.channels?.names).toEqual(["DAPI", "b"]);
+    expect(viewer.engine!.getState().physical?.channels?.names).toEqual(["DAPI", "b"]);
   });
 
   test("channel().configure wins over the active mode override (edit what you see)", async () => {
@@ -514,18 +514,18 @@ describe("projection", () => {
 describe("mode transitions", () => {
   test("slice ↔ volume preserves the physical focus", async () => {
     const viewer = await makeViewer(makeFakeCanvas(), { source: DESC_3D }); // auto → volume
-    viewer.galavi!.setTarget([1, 2, 3]);
+    viewer.engine!.setTarget([1, 2, 3]);
 
     viewer.mode = "slice";
     await viewer.ready;
     expect(viewer.resolvedMode).toBe("slice");
-    expect(viewer.galavi!.getViewConfig("main")?.type).toBe("slice");
-    expect(viewer.galavi!.getState().exploration.camera.target).toEqual([1, 2, 3]);
+    expect(viewer.engine!.getViewConfig("main")?.type).toBe("slice");
+    expect(viewer.engine!.getState().exploration.camera.target).toEqual([1, 2, 3]);
 
     viewer.mode = "volume";
     await viewer.ready;
     expect(viewer.resolvedMode).toBe("volume");
-    expect(viewer.galavi!.getState().exploration.camera.target).toEqual([1, 2, 3]);
+    expect(viewer.engine!.getState().exploration.camera.target).toEqual([1, 2, 3]);
   });
 
   test("rapid flips are last-write-wins and settle on the final mode", async () => {
@@ -536,7 +536,7 @@ describe("mode transitions", () => {
     await viewer.ready;
     expect(viewer.resolvedMode).toBe("slice");
     expect(viewer.status).toBe("ready");
-    expect(viewer.galavi!.getViewConfig("main")?.type).toBe("slice");
+    expect(viewer.engine!.getViewConfig("main")?.type).toBe("slice");
     expect(layerOf(viewer, "slice-c0").type).toBe("slice");
   });
 
@@ -564,7 +564,7 @@ describe("slice navigation (setSlicePoint)", () => {
     viewer.setSlicePoint([2, 2, 6]);
     expect(layerOf(viewer, "slice-c0").options).toMatchObject({ sliceIndex: 3 });
     expect(layerOf(viewer, "slice-c1").options).toMatchObject({ sliceIndex: 3 });
-    expect(viewer.galavi!.getState().exploration.camera.target).toEqual([2, 2, 6]);
+    expect(viewer.engine!.getState().exploration.camera.target).toEqual([2, 2, 6]);
   });
 
   test("quad mode syncs each plane along its own through axis", async () => {
@@ -578,18 +578,18 @@ describe("slice navigation (setSlicePoint)", () => {
 
   test("entering slice mode with a preserved focus shows the slice at the focus", async () => {
     const viewer = await makeViewer(makeFakeCanvas(), { source: DESC_3D }); // auto → volume
-    viewer.galavi!.setTarget([1, 2, 6]);
+    viewer.engine!.setTarget([1, 2, 6]);
     viewer.mode = "slice";
     await viewer.ready;
     expect(layerOf(viewer, "slice-c0").options).toMatchObject({ sliceIndex: 3 });
-    expect(viewer.galavi!.getState().exploration.camera.target).toEqual([1, 2, 6]);
+    expect(viewer.engine!.getState().exploration.camera.target).toEqual([1, 2, 6]);
   });
 
   test("setSlicePoint is a no-op in volume mode", async () => {
     const viewer = await makeViewer(makeFakeCanvas(), { source: DESC_3D }); // auto → volume
-    const before = viewer.galavi!.getState().exploration.camera.target;
+    const before = viewer.engine!.getState().exploration.camera.target;
     viewer.setSlicePoint([0, 0, 0]);
-    expect(viewer.galavi!.getState().exploration.camera.target).toEqual(before);
+    expect(viewer.engine!.getState().exploration.camera.target).toEqual(before);
   });
 });
 
@@ -613,22 +613,22 @@ describe("modeOverrides", () => {
 
     // Slice: base state, no overrides.
     expect(layerOf(viewer, "slice-c1").render).toMatchObject({ visible: false, contrastLimits: [0, 1] });
-    expect(viewer.galavi!.getViewConfig("main")?.overlays).toEqual({});
-    expect(viewer.galavi!.getViewConfig("main")?.controls).toEqual({ panzoom: {} });
+    expect(viewer.engine!.getViewConfig("main")?.overlays).toEqual({});
+    expect(viewer.engine!.getViewConfig("main")?.controls).toEqual({ panzoom: {} });
 
     // Volume: overrides applied on entry.
     viewer.mode = "volume";
     await viewer.ready;
     expect(layerOf(viewer, "volume-c1").render).toMatchObject({ visible: true, contrastLimits: [0.1, 0.5] });
     expect(layerOf(viewer, "volume-c0").render).toMatchObject({ visible: true, contrastLimits: [0, 1] });
-    expect(viewer.galavi!.getViewConfig("main")?.overlays).toEqual({ crosshair: {} });
-    expect(viewer.galavi!.getViewConfig("main")?.controls).toEqual({ fly: {} });
+    expect(viewer.engine!.getViewConfig("main")?.overlays).toEqual({ crosshair: {} });
+    expect(viewer.engine!.getViewConfig("main")?.controls).toEqual({ fly: {} });
 
     // Back to slice: base state again (overrides are per-mode, not sticky).
     viewer.mode = "slice";
     await viewer.ready;
     expect(layerOf(viewer, "slice-c1").render).toMatchObject({ visible: false, contrastLimits: [0, 1] });
-    expect(viewer.galavi!.getViewConfig("main")?.overlays).toEqual({});
+    expect(viewer.engine!.getViewConfig("main")?.overlays).toEqual({});
   });
 
   test("viewer.view(mode).configure is the imperative equivalent", async () => {
@@ -642,7 +642,7 @@ describe("modeOverrides", () => {
     // Configuring the ACTIVE mode re-enters it immediately.
     viewer.view("volume").configure({ tools: { ruler: true } });
     await viewer.ready;
-    expect(viewer.galavi!.getViewConfig("main")?.overlays).toEqual({ ruler: {} });
+    expect(viewer.engine!.getViewConfig("main")?.overlays).toEqual({ ruler: {} });
   });
 
   test('mode override camera: "fit" forces a re-fit, explicit target wins over focus', async () => {
@@ -651,10 +651,10 @@ describe("modeOverrides", () => {
       mode: "slice",
       modeOverrides: { volume: { camera: { target: [9, 9, 9] } } },
     });
-    viewer.galavi!.setTarget([1, 1, 1]);
+    viewer.engine!.setTarget([1, 1, 1]);
     viewer.mode = "volume";
     await viewer.ready;
-    expect(viewer.galavi!.getState().exploration.camera.target).toEqual([9, 9, 9]);
+    expect(viewer.engine!.getState().exploration.camera.target).toEqual([9, 9, 9]);
   });
 
   test("mode override transform is baked into constructed layers and survives rebuilds", async () => {
@@ -674,8 +674,8 @@ describe("modeOverrides", () => {
     // Headless: no render pass runs, so drive the same per-frame applyConfig
     // call `BaseView.render` makes to realize config → live model matrix.
     const liveMatrices = () => {
-      const state = viewer.galavi!.getState();
-      return viewer.galavi!.view("main").base.getLayers().map((layer) => {
+      const state = viewer.engine!.getState();
+      return viewer.engine!.view("main").base.getLayers().map((layer) => {
         const desc = state.layers.find((l) => l.id === layer.id)!;
         layer.applyConfig(desc, state.physical);
         return [...layer.modelMatrix];
@@ -713,8 +713,8 @@ describe("modeOverrides", () => {
     // Configuring the ACTIVE mode re-enters it immediately with the transform.
     viewer.view("volume").configure({ transform: affine });
     await viewer.ready;
-    const state = viewer.galavi!.getState();
-    for (const layer of viewer.galavi!.view("main").base.getLayers()) {
+    const state = viewer.engine!.getState();
+    for (const layer of viewer.engine!.view("main").base.getLayers()) {
       const desc = state.layers.find((l) => l.id === layer.id)!;
       layer.applyConfig(desc, state.physical);
       expect([...layer.modelMatrix]).toEqual(affine);
@@ -745,10 +745,10 @@ describe("controls and tools runtime parity", () => {
       source: DESC_3D,
       controls: { orbit: { zoomSensitivity: 1.4 } },
     });
-    expect(custom.galavi!.getViewConfig("main")?.controls).toEqual({ orbit: { zoomSensitivity: 1.4 } });
+    expect(custom.engine!.getViewConfig("main")?.controls).toEqual({ orbit: { zoomSensitivity: 1.4 } });
 
     const off = await makeViewer(makeFakeCanvas(), { source: DESC_3D, controls: {} });
-    expect(off.galavi!.getViewConfig("main")?.controls).toEqual({});
+    expect(off.engine!.getViewConfig("main")?.controls).toEqual({});
     expect(controlTypes(off)).toEqual([]);
   });
 
@@ -781,7 +781,7 @@ describe("controls and tools runtime parity", () => {
       source: DESC_3D,
       tools: { crosshair: true, ruler: { visible: false }, magnifier: "2d" },
     });
-    expect(viewer.galavi!.getViewConfig("main")?.overlays).toEqual({
+    expect(viewer.engine!.getViewConfig("main")?.overlays).toEqual({
       crosshair: {},
       ruler: { visible: false },
       "magnifier-2d": {},
@@ -824,7 +824,7 @@ describe("controls and tools runtime parity", () => {
     viewer.tool("crosshair").enable();
     viewer.mode = "volume";
     await viewer.ready;
-    expect(viewer.galavi!.getViewConfig("main")?.overlays).toMatchObject({
+    expect(viewer.engine!.getViewConfig("main")?.overlays).toMatchObject({
       crosshair: {},
       "magnifier-2d": {},
     });
@@ -834,14 +834,14 @@ describe("controls and tools runtime parity", () => {
 
   test("magnifier dimension defaults to the view kind when unpinned", async () => {
     const volumeViewer = await makeViewer(makeFakeCanvas(), { source: DESC_3D, tools: { magnifier: {} } });
-    expect(volumeViewer.galavi!.getViewConfig("main")?.overlays).toEqual({ "magnifier-3d": {} });
+    expect(volumeViewer.engine!.getViewConfig("main")?.overlays).toEqual({ "magnifier-3d": {} });
 
     const sliceViewer = await makeViewer(makeFakeCanvas(), {
       source: DESC_3D,
       mode: "slice",
       tools: { magnifier: { zoom: 6 } },
     });
-    expect(sliceViewer.galavi!.getViewConfig("main")?.overlays).toEqual({ "magnifier-2d": { zoom: 6 } });
+    expect(sliceViewer.engine!.getViewConfig("main")?.overlays).toEqual({ "magnifier-2d": { zoom: 6 } });
 
     // A bare `true` is outside the schema (a dimension pin or options bag is required).
     await expect(
@@ -857,13 +857,13 @@ describe("controls and tools runtime parity", () => {
 describe("camera", () => {
   test('config camera "fit" uses the dataset bounds; partials merge over fit', async () => {
     const fit = await makeViewer(makeFakeCanvas(), { source: DESC_3D });
-    expect(fit.galavi!.getState().exploration.camera.target).toEqual([2, 2, 4]);
+    expect(fit.engine!.getState().exploration.camera.target).toEqual([2, 2, 4]);
 
     const partial = await makeViewer(makeFakeCanvas(), {
       source: DESC_3D,
       camera: { target: [1, 1, 1], projMode: "orthographic" },
     });
-    const cam = partial.galavi!.getState().exploration.camera;
+    const cam = partial.engine!.getState().exploration.camera;
     expect(cam.target).toEqual([1, 1, 1]);
     expect(cam.projMode).toBe("orthographic");
     expect(cam.navMode).toBe("orbit"); // fit default preserved
@@ -872,12 +872,12 @@ describe("camera", () => {
   test("setCamera merges over the current camera; fitCamera reframes", async () => {
     const viewer = await makeViewer(makeFakeCanvas(), { source: DESC_3D });
     viewer.setCamera({ target: [3, 3, 3] });
-    expect(viewer.galavi!.getState().exploration.camera.target).toEqual([3, 3, 3]);
+    expect(viewer.engine!.getState().exploration.camera.target).toEqual([3, 3, 3]);
     viewer.setCamera("fit");
-    expect(viewer.galavi!.getState().exploration.camera.target).toEqual([2, 2, 4]);
+    expect(viewer.engine!.getState().exploration.camera.target).toEqual([2, 2, 4]);
     viewer.setCamera({ target: [0, 0, 0] });
     viewer.fitCamera();
-    expect(viewer.galavi!.getState().exploration.camera.target).toEqual([2, 2, 4]);
+    expect(viewer.engine!.getState().exploration.camera.target).toEqual([2, 2, 4]);
   });
 });
 
@@ -891,16 +891,16 @@ describe("quad mode", () => {
     const viewer = await makeViewer(container, { source: DESC_3D, mode: "quad" });
     expect(viewer.resolvedMode).toBe("quad");
 
-    const galavi = viewer.galavi!;
+    const engine = viewer.engine!;
     for (const [id, axes] of [["quad-xy", ["x", "y"]], ["quad-xz", ["x", "z"]], ["quad-yz", ["y", "z"]]] as const) {
-      const view = galavi.getViewConfig(id)!;
+      const view = engine.getViewConfig(id)!;
       expect(view.type).toBe("slice");
       expect(view.layers).toEqual([`${id}-c0`, `${id}-c1`]);
       expect(view.controls).toEqual({ panzoom: {} });
       expect(layerOf(viewer, `${id}-c0`).options?.axes).toEqual(axes);
       expect(layerOf(viewer, `${id}-c0`).options?.selection).toEqual({ c: 0 });
     }
-    const volume = galavi.getViewConfig("quad-3d")!;
+    const volume = engine.getViewConfig("quad-3d")!;
     expect(volume.type).toBe("volume");
     expect(volume.controls).toEqual({ orbit: {} });
     expect(layerOf(viewer, "quad-3d-c1").render?.volumeProjection).toBe("mip");
@@ -962,22 +962,22 @@ describe("serialization", () => {
 // ============================================================================
 
 describe("escape hatch and teardown", () => {
-  test("viewer.galavi exposes the low-level instance; replaced on transitions", async () => {
+  test("viewer.engine exposes the low-level instance; replaced on transitions", async () => {
     const viewer = await makeViewer();
-    expect(viewer.galavi).toBeUndefined();
+    expect(viewer.engine).toBeUndefined();
     await viewer.open(DESC_3D);
-    const first = viewer.galavi;
-    expect(first).toBeInstanceOf(Galavi);
+    const first = viewer.engine;
+    expect(first).toBeInstanceOf(ViewerEngine);
     viewer.mode = "slice";
     await viewer.ready;
-    expect(viewer.galavi).toBeInstanceOf(Galavi);
-    expect(viewer.galavi).not.toBe(first);
+    expect(viewer.engine).toBeInstanceOf(ViewerEngine);
+    expect(viewer.engine).not.toBe(first);
   });
 
   test("destroy tears down; further operations reject", async () => {
     const viewer = await makeViewer(makeFakeCanvas(), { source: DESC_3D });
     viewer.destroy();
-    expect(viewer.galavi).toBeUndefined();
+    expect(viewer.engine).toBeUndefined();
     expect(viewer.status).toBe("idle");
     await expect(viewer.open(DESC_3D)).rejects.toThrow(/destroyed/);
     expect(() => { viewer.mode = "slice"; }).toThrow(/destroyed/);
@@ -990,14 +990,14 @@ describe("escape hatch and teardown", () => {
 // ============================================================================
 
 describe("theme, autoRotate, and channel compositing", () => {
-  test("config.theme is forwarded to createGalavi (overlays resolve it)", async () => {
+  test("config.theme is forwarded to createViewerEngine (overlays resolve it)", async () => {
     const viewer = await makeViewer(makeFakeCanvas(), {
       source: DESC_3D,
       theme: { accent: "#123456" },
     });
-    expect(viewer.galavi!.theme.accent).toBe("#123456");
+    expect(viewer.engine!.theme.accent).toBe("#123456");
     // Untouched fields fall back to the default theme.
-    expect(viewer.galavi!.theme.warn).toBe("#FFC966");
+    expect(viewer.engine!.theme.warn).toBe("#FFC966");
     // The declarative mirror round-trips it (JSON-serializable).
     expect(viewer.config.theme).toEqual({ accent: "#123456" });
   });
@@ -1007,15 +1007,15 @@ describe("theme, autoRotate, and channel compositing", () => {
       source: DESC_3D,
       autoRotate: { speedDegPerSec: 8 },
     });
-    expect(viewer.galavi!.getViewConfig("main")?.autoRotate).toEqual({ speedDegPerSec: 8 });
+    expect(viewer.engine!.getViewConfig("main")?.autoRotate).toEqual({ speedDegPerSec: 8 });
     viewer.mode = "slice";
     await viewer.ready;
-    expect(viewer.galavi!.getViewConfig("main")?.autoRotate).toBeUndefined();
+    expect(viewer.engine!.getViewConfig("main")?.autoRotate).toBeUndefined();
   });
 
   test("autoRotate is off by default and validates its options bag", async () => {
     const viewer = await makeViewer(makeFakeCanvas(), { source: DESC_3D });
-    expect(viewer.galavi!.getViewConfig("main")?.autoRotate).toBeUndefined();
+    expect(viewer.engine!.getViewConfig("main")?.autoRotate).toBeUndefined();
     await expect(
       makeViewer(makeFakeCanvas(), { autoRotate: { speedDegPerSec: Number.NaN } }),
     ).rejects.toThrow(/autoRotate\.speedDegPerSec/);

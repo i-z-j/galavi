@@ -21,16 +21,16 @@ export type Vec3 = [number, number, number];
 export type PhysicalUnit = 'nm' | 'µm' | 'mm' | 'cm' | 'm';
 
 // ============================================================================
-// GALAVI CONFIG
+// VIEWER ENGINE CONFIG
 // ============================================================================
 
 /**
- * Galavi configuration — everything needed to create a Galavi instance.
+ * ViewerEngine configuration — everything needed to create a ViewerEngine instance.
  *
  * Combines state (the WHAT) and view configurations (the HOW).
- * `await createGalavi(config)` inits GPU, mounts views, returns ready instance.
+ * `await createViewerEngine(config)` inits GPU, mounts views, returns ready instance.
  */
-export interface GalaviConfig {
+export interface ViewerEngineConfig {
   /** State — physical space, layers, exploration */
   state : State;
   /** View configurations keyed by view name */
@@ -83,13 +83,13 @@ export type OverlayOptions = {
 };
 
 /**
- * View configuration — defines a single view within a Galavi instance.
- * Views are keyed by name in `GalaviConfig.views`; the key is the view ID.
+ * View configuration — defines a single view within a ViewerEngine instance.
+ * Views are keyed by name in `ViewerEngineConfig.views`; the key is the view ID.
  */
 export interface ViewConfig {
   /** View type */
   type          : string;
-  /** Canvas element to render into. Omit for delayed mounting via galavi.mount(). */
+  /** Canvas element to render into. Omit for delayed mounting via engine.mount(). */
   canvas?       : HTMLCanvasElement;
   /** Layers (IDs) to render in this view (must match IDs in state.layers) */
   layers        : ID[];

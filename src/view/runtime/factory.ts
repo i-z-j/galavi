@@ -3,7 +3,7 @@
  */
 
 import type { ID, LayerConfig, ViewConfig } from "../../types";
-import type { Galavi } from "../../main";
+import type { ViewerEngine } from "../../viewer";
 import {
   layerRegistry,
   viewRegistry,
@@ -33,10 +33,10 @@ export function createView(
   name          : string,
   config        : ViewConfig,
   layerConfigs  : LayerConfig[],
-  galavi        : Galavi,
+  engine        : ViewerEngine,
 ): ViewRuntime {
   const view = viewRegistry.create(config.type, name as ID);
-  view.setOwner(galavi);
+  view.setOwner(engine);
   view.autoResize = config.autoResize ?? true;
 
   // Instantiate layer entries

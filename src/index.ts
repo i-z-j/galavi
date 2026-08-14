@@ -3,10 +3,12 @@
  */
 
 // === Core API ===
+// Low-level composition: the engine + its config (advanced path; the Viewer
+// facade below covers the common scientific viewer).
 export {
-  Galavi,
-  createGalavi,
-} from "./main";
+  ViewerEngine,
+  createViewerEngine,
+} from "./viewer";
 
 // === Types ===
 export type {
@@ -14,7 +16,7 @@ export type {
   Vec2,
   Vec3,
   PhysicalUnit,
-  GalaviConfig,
+  ViewerEngineConfig,
   State,
   ViewConfig,
   ControlOptions,
@@ -59,8 +61,8 @@ export type {
 // === High-level Viewer facade (DX-L1/L2/M3/M6) ===
 // The common scientific viewer: one dataset session, modes, channels, camera,
 // controls/tools, and status — translated onto the low-level scene model
-// (engineering-cleanup-plan.md §15). `createGalavi` remains the advanced path;
-// `viewer.galavi` is the escape hatch.
+// (engineering-cleanup-plan.md §15). `createViewerEngine` remains the advanced
+// path; `viewer.engine` is the escape hatch.
 export {
   Viewer,
   ViewerSupersededError,

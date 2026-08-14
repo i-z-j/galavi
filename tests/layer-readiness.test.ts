@@ -8,9 +8,9 @@
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
-  createGalavi,
+  createViewerEngine,
   registerLayer,
-  type Galavi,
+  type ViewerEngine,
 } from "../src/index";
 import { BaseLayer } from "../src/layer";
 import { layerRegistry } from "../src/registry";
@@ -64,7 +64,7 @@ const initialState: State = {
 };
 
 describe("view(id).whenLayerReady", () => {
-  let galavi: Galavi | undefined;
+  let engine: ViewerEngine | undefined;
 
   beforeEach(() => {
     registerLayer("fake-async", FakeAsyncLayer.fromConfig.bind(FakeAsyncLayer));
@@ -73,23 +73,23 @@ describe("view(id).whenLayerReady", () => {
   });
 
   afterEach(() => {
-    galavi?.destroy();
-    galavi = undefined;
+    engine?.destroy();
+    engine = undefined;
     layerRegistry.unregister("fake-async");
     vi.unstubAllGlobals();
   });
 
   async function setup() {
-    galavi = await createGalavi({
+    engine = await createViewerEngine({
       state : initialState,
       views : { main: { type: "volume", layers: ["a"] } },
     });
-    const layer = galavi.view("main").getLayer("a") as FakeAsyncLayer;
-    return { galavi, layer };
+    const layer = engine.view("main").getLayer("a") as FakeAsyncLayer;
+    return { engine, layer };
   }
 
   test("pends while not ready, resolves when the layer signals ready", async () => {
-    const { galavi: g, layer } = await setup();
+    const { engine: g, layer } = await setup();
     let settled = false;
     const promise = g.view("main").whenLayerReady("a").then((resolved) => {
       settled = true;
@@ -105,19 +105,19 @@ describe("view(id).whenLayerReady", () => {
   });
 
   test("resolves immediately when the layer is already ready", async () => {
-    const { galavi: g, layer } = await setup();
+    const { engine: g, layer } = await setup();
     layer.finish();
     await expect(g.view("main").whenLayerReady("a")).resolves.toBe(layer);
   });
 
   test("rejects on an unknown layer id", async () => {
-    const { galavi: g } = await setup();
+    const { engine: g } = await setup();
     await expect(g.view("main").whenLayerReady("nope"))
       .rejects.toThrow('Layer "nope" not found in view "main"');
   });
 
   test("rejects when the abort signal fires", async () => {
-    const { galavi: g } = await setup();
+    const { engine: g } = await setup();
     const controller = new AbortController();
     const promise = g.view("main").whenLayerReady("a", { signal: controller.signal });
     controller.abort();
@@ -125,7 +125,7 @@ describe("view(id).whenLayerReady", () => {
   });
 
   test("rejects immediately for a pre-aborted signal", async () => {
-    const { galavi: g } = await setup();
+    const { engine: g } = await setup();
     const controller = new AbortController();
     controller.abort();
     await expect(g.view("main").whenLayerReady("a", { signal: controller.signal }))
@@ -133,7 +133,7 @@ describe("view(id).whenLayerReady", () => {
   });
 
   test("loadStatus tracks readiness for plain async layers (DX-M2 default)", async () => {
-    const { galavi: g, layer } = await setup();
+    const { engine: g, layer } = await setup();
     expect(layer.loadError).toBeUndefined();
     expect(g.view("main").getLayerStatus("a")).toEqual({ status: "loading" });
 

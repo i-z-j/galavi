@@ -7,7 +7,7 @@
  * keeps the descriptor as the canonical, JSON-serializable form.
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { createGalavi, type Galavi } from "../src/index";
+import { createViewerEngine, type ViewerEngine } from "../src/index";
 import { VolumeLayer } from "../src/layer";
 import {
   registerSource,
@@ -102,7 +102,7 @@ describe("Data.source descriptor resolution", () => {
     const d = deferred<ResolvedSource>();
     registerSource(SOURCE_TYPE, () => d.promise);
 
-    const galavi: Galavi = await createGalavi({
+    const engine: ViewerEngine = await createViewerEngine({
       state: {
         layers      : [{ id: "v", type: "volume", data: { source: DESC } }],
         exploration : {
@@ -117,11 +117,11 @@ describe("Data.source descriptor resolution", () => {
       views: { main: { type: "volume", layers: ["v"] } },
     });
     try {
-      const layer = galavi.view("main").getLayer("v")!;
+      const layer = engine.view("main").getLayer("v")!;
       expect(layer.isReady).toBe(false);
 
       let settled = false;
-      const ready = galavi.view("main").whenLayerReady("v").then((l) => {
+      const ready = engine.view("main").whenLayerReady("v").then((l) => {
         settled = true;
         return l;
       });
@@ -133,12 +133,12 @@ describe("Data.source descriptor resolution", () => {
       expect(settled).toBe(true);
 
       // getState() stays pure JSON — no resolved pyramid/fetch leaks back.
-      const roundTripped = JSON.parse(JSON.stringify(galavi.getState()));
+      const roundTripped = JSON.parse(JSON.stringify(engine.getState()));
       expect(roundTripped.layers[0].data.source).toEqual(DESC);
       expect(roundTripped.layers[0].data.pyramid).toBeUndefined();
       expect(roundTripped.layers[0].data.fetch).toBeUndefined();
     } finally {
-      galavi.destroy();
+      engine.destroy();
     }
   });
 
@@ -222,11 +222,11 @@ describe("Data.source descriptor resolution", () => {
     expect(String(errorSpy.mock.calls[0][1])).toContain('Unknown type: "unregistered-source"');
   });
 
-  test("a failing layer does not take down the Galavi instance", async () => {
+  test("a failing layer does not take down the ViewerEngine instance", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     registerSource(SOURCE_TYPE, () => Promise.reject(new Error("boom")));
 
-    const galavi: Galavi = await createGalavi({
+    const engine: ViewerEngine = await createViewerEngine({
       state: {
         layers: [
           { id: "v", type: "volume", data: { source: DESC } },
@@ -245,19 +245,19 @@ describe("Data.source descriptor resolution", () => {
     });
     try {
       await flush();
-      expect(galavi.view("main").getLayer("v")!.isReady).toBe(false);
-      expect(galavi.view("main").getLayer("p")!.isReady).toBe(true);
+      expect(engine.view("main").getLayer("v")!.isReady).toBe(false);
+      expect(engine.view("main").getLayer("p")!.isReady).toBe(true);
       expect(errorSpy).toHaveBeenCalled();
-      expect(() => galavi.getState()).not.toThrow();
+      expect(() => engine.getState()).not.toThrow();
     } finally {
-      galavi.destroy();
+      engine.destroy();
     }
   });
 });
 
 describe("source failure channel (DX-M2)", () => {
   const GOOD_TYPE = "fake-source-good";
-  let galavi: Galavi | undefined;
+  let engine: ViewerEngine | undefined;
 
   beforeEach(() => {
     vi.stubGlobal("requestAnimationFrame", () => 0);
@@ -265,16 +265,16 @@ describe("source failure channel (DX-M2)", () => {
   });
 
   afterEach(() => {
-    galavi?.destroy();
-    galavi = undefined;
+    engine?.destroy();
+    engine = undefined;
     sourceRegistry.unregister(SOURCE_TYPE);
     sourceRegistry.unregister(GOOD_TYPE);
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
 
-  async function setup(layers: State["layers"]): Promise<Galavi> {
-    galavi = await createGalavi({
+  async function setup(layers: State["layers"]): Promise<ViewerEngine> {
+    engine = await createViewerEngine({
       state: {
         layers,
         exploration: {
@@ -288,7 +288,7 @@ describe("source failure channel (DX-M2)", () => {
       },
       views: { main: { type: "volume", layers: layers.map((l) => l.id) } },
     });
-    return galavi;
+    return engine;
   }
 
   test("failed resolution rejects whenLayerReady with the factory's error (cause preserved)", async () => {

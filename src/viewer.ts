@@ -1,16 +1,17 @@
 /**
- * Viewer — the high-level facade over the low-level Galavi scene API
- * (DX-L1 facade, DX-L2 mode transitions, DX-M3 channel model, DX-M6
- * control/tool runtime parity).
+ * Viewer — the public viewing API in one module.
  *
- * The Viewer OWNS one dataset session and translates the minimal
- * `ViewerConfig` schema into the existing low-level scene model
- * (engineering-cleanup-plan.md §15.5): one typed volume/slice layer per
- * channel with nested `options.selection.c`, one view per mode, cameras via
- * the existing fit helpers, controls/tools via the existing control/overlay
- * registries. Nothing here forks the scene model — `createGalavi`, layer
- * configs, and view configs do the work; `viewer.galavi` is the explicit
- * escape hatch for advanced composition.
+ * Two layers live here:
+ *
+ * - `ViewerEngine` + `createViewerEngine` — the low-level orchestrator and
+ *   state authority. Holds the global State, manages global GPU, Render and
+ *   Views. Composed directly by advanced integrations (and internally by the
+ *   facade and the 3D magnifier loupe).
+ * - `Viewer` + `createViewer` — the high-level facade (DX-L1/L2/M3/M6): one
+ *   dataset session with modes, channels, camera, controls, and tools,
+ *   translated onto the engine's scene model (engineering-cleanup-plan.md
+ *   §15). `viewer.engine` is the explicit escape hatch for advanced
+ *   composition.
  *
  * Async discipline (DX-M2/DX-L2): `open()` and mode transitions are
  * last-write-wins. Every operation carries a revision token; a superseded
@@ -19,54 +20,813 @@
  * operation; `viewer.status` tracks idle/loading/ready/error.
  */
 
-import { createGalavi, Galavi } from "../main";
-import { openDataset, type ResolvedDataset } from "../dataset";
-import { controlRegistry, overlayRegistry } from "../registry";
+import { vec3 } from "wgpu-matrix";
 import type {
   Camera,
   ControlOptions,
-  GalaviConfig,
+  Data,
+  Exploration,
+  ID,
   LayerConfig,
   OverlayOptions,
   PhysicalSpace,
   Render,
   SourceDescriptor,
+  State,
   Vec3,
   ViewConfig,
-} from "../types";
-import type { BaseControl } from "../control";
-import type { BaseOverlay } from "../overlay";
+  ViewResolution,
+  ViewerEngineConfig,
+  VolumeRenderMode,
+} from "./types";
 import {
+  AUTO_ROTATE_SPEED_DEG_PER_SEC,
+  DEFAULT_CAMERA_NAV_MODE,
+  DEFAULT_CAMERA_PROJ_MODE,
+  DEFAULT_EXPLORATION,
+  DEFAULT_STATE,
+} from "./defaults";
+import { BaseView } from "./view";
+import { createView, type ViewRuntime } from "./view/runtime";
+import type { BaseLayer, LayerLoadState } from "./layer";
+import { resolveTheme, type DeepPartial, type GalaviTheme } from "./overlay/theme";
+import type {
+  CrosshairOverlayOptions,
+  MagnifierOverlayOptions,
+  OverlayOptionsMap,
+  RoiSelectorOverlayOptions,
+  RulerOverlayOptions,
+} from "./overlay/options";
+import { openDataset, type ResolvedDataset } from "./dataset";
+import { controlRegistry, overlayRegistry } from "./registry";
+import type {
+  BaseControl,
+  FlyControlOptions,
+  OrbitControlOptions,
+  PanZoomControlOptions,
+} from "./control";
+import type { BaseOverlay } from "./overlay";
+import {
+  cameraAngles,
+  cameraDistance,
   clampContrastLimits,
+  computeForward,
+  computePosition,
   fitSliceCamera,
   frameVolumeCamera,
   normalizeHexColor,
   resolveAxes,
-} from "../utils";
-import type {
-  ResolvedViewerMode,
-  ViewerCamera,
-  ViewerChannelAccessor,
-  ViewerChannelConfig,
-  ViewerChannelPatch,
-  ViewerChannelState,
-  ViewerConfig,
-  ViewerControlAccessor,
-  ViewerControlName,
-  ViewerControlOptionsMap,
-  ViewerControlsConfig,
-  ViewerMagnifierOptions,
-  ViewerMode,
-  ViewerModeOverride,
-  ViewerModeOverrides,
-  ViewerProjection,
-  ViewerStatus,
-  ViewerToolAccessor,
-  ViewerToolName,
-  ViewerToolOptionsMap,
-  ViewerToolsConfig,
-  ViewerViewAccessor,
-} from "./types";
+} from "./utils";
+
+// ============================================================================
+// VIEWER ENGINE (low-level orchestrator)
+// ============================================================================
+
+type LayerAccessor<TOptions = Record<string, unknown>> = {
+  readonly config: LayerConfig<TOptions>;
+  setRender(partial: Partial<Render>): void;
+  setOptions(partial: Partial<TOptions>): void;
+  setData(partial: Partial<Data>): void;
+};
+
+type ViewAccessor = {
+  /**
+   * Update a view overlay's options at runtime. Built-in overlay types
+   * (`OverlayOptionsMap` keys) get their exact options bag — a misspelled key
+   * is a compile error; custom overlay types registered via `registerOverlay`
+   * keep the `Record<string, unknown>` escape hatch.
+   */
+  setOverlayOptions<K extends string>(
+    overlayType : K,
+    opts        : K extends keyof OverlayOptionsMap
+      ? Partial<OverlayOptionsMap[K]>
+      : Record<string, unknown>,
+  ): void;
+  getLayer(id: ID): BaseLayer | undefined;
+  /**
+   * Resolve once the layer reports `isReady` (see `BaseView.whenLayerReady`
+   * for the full semantics). Rejects when the layer ID is unknown in this
+   * view, when the layer's source fails to load (DX-M2 — with the recorded
+   * load error), when `opts.signal` aborts, or when the layer/view goes away.
+   */
+  whenLayerReady(layerId: ID, opts?: { signal?: AbortSignal }): Promise<BaseLayer>;
+  /**
+   * Snapshot of a layer's load state (DX-M2): `idle` / `loading` / `ready` /
+   * `error`, with the recorded error when failed (see
+   * `BaseView.getLayerStatus`). Returns undefined when the layer ID is
+   * unknown in this view.
+   */
+  getLayerStatus(layerId: ID): LayerLoadState | undefined;
+  getCurrentLevel(layerId: ID): number | undefined;
+  getResolution(layerId: ID): ViewResolution | undefined;
+  readonly config: ViewConfig;
+  readonly base: BaseView;
+};
+
+export class ViewerEngine {
+  /** Resolved overlay UI theme (`ViewerEngineConfig.theme` over the FUI defaults). */
+  readonly theme: GalaviTheme;
+
+  private _exploration  : Exploration;
+  private _layers       : LayerConfig[];
+  private _physical?    : PhysicalSpace;
+
+  private readonly _subscribers = new Set<(state: State) => void>();
+
+  private _views              = new Map<string, ViewRuntime>();
+  private _device?             : GPUDevice;
+  private _activeViewId?       : string;
+  private _pendingRenderState? : State;
+  private _renderFrameId?      : number;
+
+  private _autoRotateActive   = false;
+  private _autoRotateSpeedDeg = AUTO_ROTATE_SPEED_DEG_PER_SEC;
+  private _autoRotateFrameId? : number;
+  private _autoRotateLastTs   = 0;
+
+  // ====================================================================
+  // CONSTRUCTOR
+  // ====================================================================
+
+  constructor(config: ViewerEngineConfig) {
+    this.theme = resolveTheme(config.theme);
+
+    // Initialize State
+    const initial = normalizeInitialState(config.state ?? DEFAULT_STATE);
+    this._physical    = initial.physical;
+    this._layers      = initial.layers;
+    this._exploration = initial.exploration;
+
+    // Create Views
+    for (const [name, vc] of Object.entries(config.views)) {
+      this._views.set(name, createView(name, vc, this._layers, this));
+    }
+
+    // Auto-rotate: enabled by the first volume view that opts in.
+    for (const vc of Object.values(config.views)) {
+      if (vc.type !== "volume" || !vc.autoRotate) continue;
+      this._autoRotateActive = true;
+      if (typeof vc.autoRotate === "object" && typeof vc.autoRotate.speedDegPerSec === "number") {
+        this._autoRotateSpeedDeg = vc.autoRotate.speedDegPerSec;
+      }
+      break;
+    }
+  }
+
+  // ====================================================================
+  // GPU & RENDER
+  // ====================================================================
+
+  async initGPU(): Promise<void> {
+    if (this._device) return;
+
+    const adapter = await navigator.gpu?.requestAdapter();
+    if (!adapter) throw new Error("WebGPU not supported");
+    this._device = await adapter.requestDevice();
+
+    for (const vr of this._views.values()) {
+      vr.view.setDevice(this._device);
+    }
+  }
+
+  private render(state: State): void {
+    for (const vr of this._views.values()) {
+      try {
+        vr.view.render(state);
+      } catch (e) {
+        // Don't crash sibling views on a single bad view; surface as error.
+        console.error(`[ViewerEngine] view "${vr.view.id}" render failed:`, e);
+      }
+    }
+  }
+
+  private scheduleRender(state: State): void {
+    this._pendingRenderState = state;
+    if (this._renderFrameId !== undefined) return;
+
+    this._renderFrameId = requestAnimationFrame(() => {
+      this._renderFrameId = undefined;
+      const nextState = this._pendingRenderState;
+      this._pendingRenderState = undefined;
+      if (nextState) this.render(nextState);
+    });
+  }
+
+  // ====================================================================
+  // STATE
+  // ====================================================================
+
+  /** Get the full state snapshot (mutable clone — safe for controls to mutate). */
+  getState(): State {
+    return {
+      physical    : normalizePhysicalSpace(this._physical),
+      layers      : this._layers.map(l => ({
+        ...l,
+        render  : l.render  ? { ...l.render }  : undefined,
+        options : l.options ? { ...l.options } : undefined,
+        data    : l.data    ? { ...l.data }    : undefined,
+      })),
+      exploration : {
+        ...this._exploration,
+        camera: {
+          ...this._exploration.camera,
+          position : [...this._exploration.camera.position] as Vec3,
+          target   : [...this._exploration.camera.target] as Vec3,
+          ...(this._exploration.camera.up ? { up: [...this._exploration.camera.up] as Vec3 } : {}),
+        },
+        ...(this._exploration.temporal ? { temporal: { ...this._exploration.temporal } } : {}),
+      },
+    };
+  }
+
+  /** Replace the full state. Normalizes, notifies subscribers, schedules render. */
+  setState(next: State): void {
+    this._commit(next);
+  }
+
+  /**
+   * Schedule a render of the current state without going through commit/notify.
+   *
+   * Use for render-only triggers (e.g. tile uploads, animation ticks, async
+   * geometry loads) where state did not logically change. Avoids the deep clone
+   * + subscriber fan-out of a full `setState(getState())` round trip.
+   */
+  requestRender(): void {
+    this.scheduleRender(this._sharedSnapshot());
+  }
+
+  /** Subscribe to state changes. Returns an unsubscribe function. */
+  subscribe(callback: (state: State) => void): () => void {
+    this._subscribers.add(callback);
+    return () => { this._subscribers.delete(callback); };
+  }
+
+  // ====================================================================
+  // CONVENIENCE ACCESSORS
+  // ====================================================================
+
+  /** Current camera state (read-only by convention). */
+  get camera(): Camera {
+    return this._exploration.camera;
+  }
+
+  /** Cloned copy of the current camera target position. */
+  get target(): Vec3 {
+    return [...this._exploration.camera.target] as Vec3;
+  }
+
+  /** Get a layer handle by ID, or undefined if not found. */
+  layer<TOptions = Record<string, unknown>>(id: ID): LayerAccessor<TOptions> | undefined {
+    if (!this._layers.some(l => l.id === id)) return undefined;
+    const self = this;
+
+    // Each setter takes a fresh deep-clone of state, mutates the matching
+    // layer entry, and feeds it back through the normal commit path. This
+    // avoids holding a stale reference to a removed/reordered entry and
+    // means there is one and only one mutation site (`_commit`).
+    const updateLayer = (mutate: (layer: LayerConfig) => void): void => {
+      const next   = self.getState();
+      const target = next.layers.find(l => l.id === id);
+      if (!target) return;
+      mutate(target);
+      self._commit(next);
+    };
+
+    return {
+      get config(): LayerConfig<TOptions> {
+        const entry = self._layers.find(l => l.id === id)!;
+        return {
+          ...entry,
+          render  : entry.render  ? { ...entry.render }  : undefined,
+          options : entry.options ? { ...entry.options } : undefined,
+          data    : entry.data    ? { ...entry.data }    : undefined,
+        } as LayerConfig<TOptions>;
+      },
+      setRender(partial: Partial<Render>): void {
+        updateLayer((layer) => {
+          layer.render = { ...(layer.render ?? {}), ...partial };
+        });
+      },
+      setOptions(partial: Partial<TOptions>): void {
+        updateLayer((layer) => {
+          if (!layer.options) layer.options = {};
+          for (const [key, value] of Object.entries(partial as Record<string, unknown>)) {
+            const existing = layer.options[key];
+            if (
+              existing && typeof existing === "object" && !Array.isArray(existing) &&
+              value    && typeof value    === "object" && !Array.isArray(value)
+            ) {
+              layer.options[key] = {
+                ...(existing as Record<string, unknown>),
+                ...(value    as Record<string, unknown>),
+              };
+            } else {
+              layer.options[key] = value;
+            }
+          }
+        });
+      },
+      setData(partial: Partial<Data>): void {
+        updateLayer((layer) => {
+          layer.data = { ...(layer.data ?? {}), ...partial } as Data;
+        });
+      },
+    };
+  }
+
+  /** Set the camera target position (mode-aware: orbit recomputes position). */
+  setTarget(target: Vec3): void {
+    const state = this.getState();
+    const cam = state.exploration.camera;
+    cam.target = [...target] as Vec3;
+    if (cam.navMode === "orbit") {
+      const dist = cameraDistance(cam);
+      const { yaw, pitch } = cameraAngles(cam);
+      cam.position = computePosition(cam.target, dist, yaw, pitch);
+    }
+    this._commit(state);
+  }
+
+  /** Switch navigation mode (orbit ↔ fly) with camera recomputation. */
+  setNavMode(mode: "orbit" | "fly"): void {
+    const state = this.getState();
+    const cam = state.exploration.camera;
+    if (cam.navMode === mode) return;
+    if (mode === "orbit") {
+      const { yaw, pitch } = cameraAngles(cam);
+      const dist = cameraDistance(cam);
+      const forward = computeForward(yaw, pitch);
+      cam.target = vec3.add(cam.position, vec3.scale(forward, dist)) as Vec3;
+    }
+    cam.navMode = mode;
+    this._commit(state);
+  }
+
+  private _commit(next: State): void {
+    // Normalize
+    const norm = normalizeState(next);
+
+    // Apply
+    this._exploration = norm.exploration;
+    this._layers      = norm.layers;
+    this._physical    = norm.physical;
+
+    // Notify subscribers with a fresh mutable clone so they cannot accidentally
+    // poison internal state. Render path uses a shared snapshot — read-only.
+    if (this._subscribers.size > 0) {
+      const snapshot = this.getState();
+      for (const cb of this._subscribers) cb(snapshot);
+    }
+    this.scheduleRender(this._sharedSnapshot());
+  }
+
+  /** Internal: shared (non-cloned) state view for read-only render path. */
+  private _sharedSnapshot(): State {
+    return {
+      physical    : this._physical,
+      layers      : this._layers,
+      exploration : this._exploration,
+    };
+  }
+
+  // ====================================================================
+  // VIEWS
+  // ====================================================================
+
+  /** Get a view by ID. */
+  view(viewId: ID): ViewAccessor {
+    const vr = this._views.get(viewId);
+    if (!vr) throw new Error(`View "${viewId}" not found`);
+    return {
+      setOverlayOptions: (overlayType: string, opts: Record<string, unknown>) => {
+        vr.overlays.get(overlayType)?.setOptions?.(opts);
+        this.requestRender();
+      },      getLayer: (id: ID) => vr.layers.get(id),
+      whenLayerReady: (layerId: ID, opts?: { signal?: AbortSignal }) => {
+        const layer = vr.layers.get(layerId);
+        if (!layer) {
+          return Promise.reject(
+            new Error(`Layer "${layerId}" not found in view "${viewId}"`),
+          );
+        }
+        return vr.view.whenLayerReady(layer, opts?.signal);
+      },
+      getLayerStatus: (layerId: ID) => vr.view.getLayerStatus(layerId),
+      getCurrentLevel: (layerId: ID) => vr.view.getCurrentLevel(layerId),
+      getResolution: (layerId: ID) => vr.view.getResolution(layerId),
+      get config() {
+        return vr.config;
+      },
+      get base() {
+        return vr.view;
+      },
+    };
+  }
+
+  getViewConfig(viewId: ID): ViewConfig | undefined {
+    return this._views.get(viewId)?.config;
+  }
+
+  setActiveView(viewId: ID): void {
+    const vr = this._views.get(viewId);
+    if (!vr) throw new Error(`View "${viewId}" not found`);
+    if (!vr.activatable) return;
+
+    if (this._activeViewId) {
+      const prev = this._views.get(this._activeViewId);
+      if (prev) {
+        prev.view.disableEvents();
+        prev.view.isActive = false;
+      }
+    }
+
+    this._activeViewId = viewId;
+    vr.view.enableEvents();
+    vr.view.isActive = true;
+  }
+
+  getActiveView(): ID | undefined {
+    return this._activeViewId;
+  }
+
+  async mount(viewId: ID, canvas: HTMLCanvasElement): Promise<void> {
+    const vr = this._views.get(viewId);
+    if (!vr) throw new Error(`View "${viewId}" not found`);
+
+    if (!this._device) await this.initGPU();
+    await vr.view.mount(canvas);
+    this.requestRender();
+    if (this._autoRotateActive) this.startAutoRotate();
+  }
+
+  async mountAll(canvases: Record<ID, HTMLCanvasElement>): Promise<void> {
+    if (!this._device) await this.initGPU();
+    for (const [id, canvas] of Object.entries(canvases)) {
+      const vr = this._views.get(id);
+      if (!vr) throw new Error(`View "${id}" not found`);
+      await vr.view.mount(canvas);
+    }
+    this.scheduleRender(this.getState());
+    if (this._autoRotateActive) this.startAutoRotate();
+  }
+
+  unmount(viewId: ID): void {
+    const vr = this._views.get(viewId);
+    if (!vr) throw new Error(`View "${viewId}" not found`);
+    vr.view.unmount();
+  }
+
+  // ====================================================================
+  // AUTO-ROTATE
+  // ====================================================================
+
+  /**
+   * Idle camera spin for volume views (`ViewConfig.autoRotate`). Advances the
+   * camera yaw through the normal commit path, so subscribers and overlays
+   * observe the same state flow as an interactive orbit drag (same update
+   * rate). Stops permanently on the first user input via `stopAutoRotate()`.
+   */
+  private startAutoRotate(): void {
+    if (this._autoRotateFrameId !== undefined) return;
+    this._autoRotateLastTs = performance.now();
+
+    const tick = (ts: number) => {
+      if (!this._autoRotateActive) {
+        this._autoRotateFrameId = undefined;
+        return;
+      }
+      const dt = Math.min((ts - this._autoRotateLastTs) / 1000, 0.1);
+      this._autoRotateLastTs = ts;
+
+      const state = this.getState();
+      const cam   = state.exploration.camera;
+      const dist  = cameraDistance(cam);
+      const { yaw, pitch } = cameraAngles(cam);
+      cam.position = computePosition(
+        cam.target,
+        dist,
+        yaw + (this._autoRotateSpeedDeg * Math.PI / 180) * dt,
+        pitch,
+      );
+      this._commit(state);
+
+      this._autoRotateFrameId = requestAnimationFrame(tick);
+    };
+
+    this._autoRotateFrameId = requestAnimationFrame(tick);
+  }
+
+  /** Stop auto-rotate permanently. Called by views on first user input. */
+  stopAutoRotate(): void {
+    this._autoRotateActive = false;
+    if (this._autoRotateFrameId !== undefined) {
+      cancelAnimationFrame(this._autoRotateFrameId);
+      this._autoRotateFrameId = undefined;
+    }
+  }
+
+  // ====================================================================
+  // CLEANUP
+  // ====================================================================
+
+  destroy(): void {
+    this.stopAutoRotate();
+    if (this._renderFrameId !== undefined) {
+      cancelAnimationFrame(this._renderFrameId);
+      this._renderFrameId = undefined;
+    }
+    this._pendingRenderState = undefined;
+    for (const vr of this._views.values()) {
+      vr.view.destroy();
+    }
+    // Release the GPU device itself — destroyed ViewerEngine instances must not
+    // keep counting against the browser's per-page WebGPU device limit.
+    this._device?.destroy();
+    this._device = undefined;
+  }
+}
+
+// ============================================================================
+// FACTORY
+// ============================================================================
+
+/**
+ * Create a ViewerEngine instance from a ViewerEngineConfig.
+ * Initialises GPU and mounts views that have a canvas specified.
+ */
+export async function createViewerEngine(config: ViewerEngineConfig): Promise<ViewerEngine> {
+  const engine = new ViewerEngine(config);
+
+  const canvasMap: Record<string, HTMLCanvasElement> = {};
+  for (const [name, vc] of Object.entries(config.views)) {
+    if (vc.canvas) canvasMap[name] = vc.canvas;
+  }
+
+  if (Object.keys(canvasMap).length > 0) {
+    await engine.mountAll(canvasMap);
+  }
+
+  return engine;
+}
+
+// ============================================================================
+// UTILITIES
+// ============================================================================
+
+function normalizeExploration(exploration: Exploration): Exploration {
+  const cam = exploration.camera;
+  return {
+    camera: {
+      navMode   : cam.navMode ?? DEFAULT_CAMERA_NAV_MODE,
+      projMode  : cam.projMode ?? DEFAULT_CAMERA_PROJ_MODE,
+      position  : [...cam.position] as Vec3,
+      target    : [...cam.target] as Vec3,
+      up        : cam.up ? ([...cam.up] as Vec3) : undefined,
+    },
+    temporal: exploration.temporal ? { ...exploration.temporal } : undefined,
+  };
+}
+
+function normalizeLayers(layers: LayerConfig[]): LayerConfig[] {
+  return layers.map((l) => {
+    const render = l.render ? { ...l.render } : {};
+    if (render.visible === undefined) render.visible = true;
+    return { ...l, render };
+  });
+}
+
+function normalizePhysicalSpace(physical?: PhysicalSpace): PhysicalSpace | undefined {
+  if (!physical) return undefined;
+  return {
+    ...physical,
+    spatial: {
+      ...physical.spatial,
+      size      : [...physical.spatial.size] as Vec3,
+      spacing   : physical.spatial.spacing ? [...physical.spatial.spacing] as Vec3 : undefined,
+      origin    : physical.spatial.origin ? [...physical.spatial.origin] as Vec3 : undefined,
+      transform : physical.spatial.transform ? [...physical.spatial.transform] : undefined,
+    },
+  };
+}
+
+/** Normalize full state — camera constraints, layer defaults, deep-copy physical. */
+export function normalizeState(state: State): State {
+  return {
+    exploration : normalizeExploration(state.exploration),
+    layers      : normalizeLayers(state.layers),
+    physical    : normalizePhysicalSpace(state.physical),
+  };
+}
+
+export function normalizeInitialState(state: State): State {
+  return normalizeState({
+    ...DEFAULT_STATE,
+    ...state,
+    exploration: {
+      ...DEFAULT_EXPLORATION,
+      ...state.exploration,
+      camera: {
+        ...DEFAULT_EXPLORATION.camera,
+        ...state.exploration.camera,
+      },
+    },
+  });
+}
+
+// ============================================================================
+// VIEWER CONFIG
+// ============================================================================
+
+/**
+ * Visualization mode. `"auto"` resolves deterministically per dataset
+ * capabilities (§16): z=1 → slice; z>1 → volume when the dataset reports 3D
+ * support and the automatic tile-budget policy (DX-M4) yields a valid bounded
+ * preview; otherwise slice, with volume still exposed in
+ * `viewer.availableModes`.
+ */
+export type ViewerMode = "auto" | "slice" | "volume" | "quad";
+
+/** A concrete (non-auto) mode. */
+export type ResolvedViewerMode = Exclude<ViewerMode, "auto">;
+
+/** Volume ray-march accumulation — maps to low-level `render.volumeProjection` (DX-Q5). */
+export type ViewerProjection = VolumeRenderMode;
+
+/** Viewer load/transition status (DX-M2). */
+export type ViewerStatus = "idle" | "loading" | "ready" | "error";
+
+/** One channel's declarative config — the `viewer.channel(index)` counterpart (DX-M3). */
+export interface ViewerChannelConfig {
+  /** Channel index — the `c` selection value of the underlying layers. */
+  index     : number;
+  /** Display label (defaults to the dataset's normalized label). */
+  label?    : string;
+  /** Visibility (defaults to metadata `active` flags, else first channel only). */
+  visible?  : boolean;
+  /** Display color, `#RRGGBB` (a missing `#` is added; malformed values throw). */
+  color?    : string;
+  /** Contrast window, clamped to normalized [0, 1] with low ≤ high. */
+  contrast? : [number, number];
+}
+
+/** Initial/updated camera: `"fit"` frames the dataset bounds; a partial merges over it. */
+export type ViewerCamera = "fit" | Partial<Camera>;
+
+/**
+ * Declarative control set (DX-M6). `true` enables with defaults, an options
+ * bag enables with those options, `false`/absent disables. When `controls` is
+ * present it fully specifies the control set for the current mode's views;
+ * when absent, the mode default applies (orbit for volume, panzoom for
+ * slice; quad gets panzoom on the plane views and orbit on the 3D view).
+ */
+export interface ViewerControlsConfig {
+  orbit?   : boolean | OrbitControlOptions;
+  fly?     : boolean | FlyControlOptions;
+  panzoom? : boolean | PanZoomControlOptions;
+}
+
+/** Magnifier tool options: the overlay options plus an optional dimension pin. */
+export type ViewerMagnifierOptions = MagnifierOverlayOptions & {
+  /** Loupe dimension; defaults to `"3d"` on volume views, `"2d"` on slice views. */
+  dimension?: "2d" | "3d";
+};
+
+/**
+ * Declarative tool set (DX-M6). Tools map to built-in overlays: crosshair →
+ * `"crosshair"`, ruler → `"ruler"`, roi → `"roiselector"`, magnifier →
+ * `"magnifier-2d"`/`"magnifier-3d"`. `true` enables with defaults, an options
+ * bag enables with those options (same typed bag as the overlay), `false`/
+ * absent disables. When `tools` is present it fully specifies the tool set.
+ */
+export interface ViewerToolsConfig {
+  crosshair? : boolean | CrosshairOverlayOptions;
+  ruler?     : boolean | RulerOverlayOptions;
+  magnifier? : false | "2d" | "3d" | ViewerMagnifierOptions;
+  roi?       : boolean | RoiSelectorOverlayOptions;
+}
+
+/**
+ * Per-mode overrides applied when ENTERING that mode (scientifically
+ * justified per-mode contrast/tools). Imperative equivalent:
+ * `viewer.view(mode).configure(value)`. Overrides layer over the base config:
+ * channels merge per index, camera/controls/tools replace the base value for
+ * that mode's entries when present.
+ */
+export interface ViewerModeOverride {
+  channels? : ViewerChannelConfig[];
+  camera?   : ViewerCamera;
+  controls? : ViewerControlsConfig;
+  tools?    : ViewerToolsConfig;
+  /**
+   * Model transform for every layer CONSTRUCTED for this mode — a 4×4
+   * column-major affine forwarded to each layer's `data.transform`. Because
+   * it is layer config (not runtime mutation), it survives the Viewer's
+   * open/mode-transition rebuilds by construction. Like the low-level
+   * `data.transform`, it replaces the default physical-space scale/translate
+   * (see `applyTransformConfig`), so the affine must encode the full
+   * voxel→world mapping. Absent → the physical-space default.
+   */
+  transform? : number[];
+}
+
+export type ViewerModeOverrides = Partial<Record<ResolvedViewerMode, ViewerModeOverride>>;
+
+/**
+ * The minimal high-level viewer schema (§15.2). JSON-serializable by
+ * contract: no callbacks, no runtime resources.
+ */
+export interface ViewerConfig {
+  /** Dataset source descriptor; resolved via `openDataset` (DX-M1). */
+  source?        : SourceDescriptor;
+  /** Visualization mode (default `"auto"`). */
+  mode?          : ViewerMode;
+  /** Channel overrides over the dataset's normalized channels. */
+  channels?      : ViewerChannelConfig[];
+  /** Volume accumulation projection (default `"mip"`). */
+  projection?    : ViewerProjection;
+  /** Initial camera (default `"fit"` via the dataset bounds helpers). */
+  camera?        : ViewerCamera;
+  controls?      : ViewerControlsConfig;
+  tools?         : ViewerToolsConfig;
+  modeOverrides? : ViewerModeOverrides;
+  /**
+   * Overlay UI theme, merged over the engine's default theme and forwarded to
+   * the underlying `createViewerEngine` call. Plain string bag — stays JSON-serializable.
+   */
+  theme?         : DeepPartial<GalaviTheme>;
+  /**
+   * Idle camera spin for volume views — forwarded to the generated volume
+   * `ViewConfig.autoRotate`. Absent/false disables (the low-level default).
+   */
+  autoRotate?    : boolean | { speedDegPerSec?: number };
+}
+
+// ============================================================================
+// IMPERATIVE ACCESSORS
+// ============================================================================
+
+/** Channel patch accepted by `viewer.channel(index).configure` (DX-M3). */
+export type ViewerChannelPatch = Partial<Omit<ViewerChannelConfig, "index">>;
+
+/** Fully-resolved channel state (dataset defaults + overrides). */
+export interface ViewerChannelState {
+  index    : number;
+  label    : string;
+  visible  : boolean;
+  color    : string;
+  contrast : [number, number];
+}
+
+/** `viewer.control(name)` handle (DX-M6). */
+export interface ViewerControlAccessor<TOptions> {
+  /** Whether the control is currently part of the active control set. */
+  readonly enabled : boolean;
+  /** Merge typed options and enable; same bag as the declarative key. */
+  configure(options : Partial<TOptions>) : void;
+  /** Enable (default options when never configured) or disable. */
+  enable(enabled? : boolean) : void;
+}
+
+/** `viewer.tool(name)` handle (DX-M6). */
+export interface ViewerToolAccessor<TOptions> {
+  /** Whether the tool's overlay is currently attached and visible. */
+  readonly enabled : boolean;
+  /** Merge typed options and enable; same bag as the declarative key. */
+  configure(options : Partial<TOptions>) : void;
+  /** Enable (default options when never configured) or disable. */
+  enable(enabled? : boolean) : void;
+}
+
+/** `viewer.channel(index)` handle (DX-M3). */
+export interface ViewerChannelAccessor {
+  /** Current effective channel state (dataset defaults + overrides). */
+  readonly config : ViewerChannelState;
+  /** Merge a channel patch; same validation/default merge as `channels[n]`. */
+  configure(patch : ViewerChannelPatch) : void;
+}
+
+/** `viewer.view(mode)` handle — the imperative `modeOverrides[mode]` equivalent. */
+export interface ViewerViewAccessor {
+  /** Merge per-mode overrides; applies immediately when that mode is active. */
+  configure(value : ViewerModeOverride) : void;
+}
+
+/** Typed control names and their option bags. */
+export interface ViewerControlOptionsMap {
+  orbit   : OrbitControlOptions;
+  fly     : FlyControlOptions;
+  panzoom : PanZoomControlOptions;
+}
+export type ViewerControlName = keyof ViewerControlOptionsMap;
+
+/** Typed tool names and their option bags. */
+export interface ViewerToolOptionsMap {
+  crosshair : CrosshairOverlayOptions;
+  ruler     : RulerOverlayOptions;
+  magnifier : ViewerMagnifierOptions;
+  roi       : RoiSelectorOverlayOptions;
+}
+export type ViewerToolName = keyof ViewerToolOptionsMap;
 
 // ============================================================================
 // ERRORS + VALIDATION
@@ -419,7 +1179,7 @@ function resolveTarget(element: string | HTMLElement | HTMLCanvasElement): Viewe
 /**
  * Viewer — one dataset session with modes, channels, camera, controls, and
  * tools. Create via {@link createViewer}; reach the low-level scene instance
- * through `viewer.galavi` for advanced composition.
+ * through `viewer.engine` for advanced composition.
  */
 export class Viewer {
   private readonly _target: ViewerTarget;
@@ -438,7 +1198,7 @@ export class Viewer {
 
   // Runtime state.
   private _dataset?: ResolvedDataset;
-  private _galavi?: Galavi;
+  private _engine?: ViewerEngine;
   private _unsubscribe?: () => void;
   /**
    * Live overlay instances per view, keyed by the registry type they were
@@ -495,12 +1255,12 @@ export class Viewer {
   }
 
   /**
-   * The low-level escape hatch (§15.1): the current Galavi instance. Replaced
+   * The low-level escape hatch (§15.1): the current ViewerEngine instance. Replaced
    * on `open()` and on mode transitions — do not cache it across either.
    * Undefined until the first successful open.
    */
-  get galavi(): Galavi | undefined {
-    return this._galavi;
+  get engine(): ViewerEngine | undefined {
+    return this._engine;
   }
 
   /** Load/transition status (DX-M2). */
@@ -700,9 +1460,9 @@ export class Viewer {
     this._assertUsable("projection");
     assertProjection(value);
     this._projection = value;
-    if (!this._galavi || !this._resolvedMode) return;
+    if (!this._engine || !this._resolvedMode) return;
     for (const id of this._volumeLayerIds(this._resolvedMode)) {
-      this._galavi.layer(id)?.setRender({ volumeProjection: value });
+      this._engine.layer(id)?.setRender({ volumeProjection: value });
     }
   }
 
@@ -717,23 +1477,23 @@ export class Viewer {
     this._assertUsable("setCamera");
     const normalized = normalizeCamera(value, "viewer.setCamera") ?? "fit";
     this._cameraConfig = normalized;
-    if (!this._galavi) return;
+    if (!this._engine) return;
     if (normalized === "fit") {
       this.fitCamera();
       return;
     }
-    const state = this._galavi.getState();
+    const state = this._engine.getState();
     state.exploration.camera = mergeCamera(state.exploration.camera, normalized);
-    this._galavi.setState(state);
+    this._engine.setState(state);
   }
 
   /** Reframe the dataset bounds for the current mode via the existing fit helpers. */
   fitCamera(): void {
     this._assertUsable("fitCamera");
-    if (!this._galavi || !this._resolvedMode || !this._dataset) return;
-    const state = this._galavi.getState();
+    if (!this._engine || !this._resolvedMode || !this._dataset) return;
+    const state = this._engine.getState();
     state.exploration.camera = this._fitCamera(this._resolvedMode);
-    this._galavi.setState(state);
+    this._engine.setState(state);
   }
 
   /**
@@ -744,12 +1504,12 @@ export class Viewer {
    */
   setSlicePoint(point: Vec3): void {
     this._assertUsable("setSlicePoint");
-    const galavi = this._galavi;
+    const engine = this._engine;
     const mode = this._resolvedMode;
-    if (!galavi || !mode) return;
+    if (!engine || !mode) return;
     if (!viewEntriesForMode(mode).some((entry) => entry.kind === "slice")) return;
     this._syncSliceLayers(mode, point);
-    const state = galavi.getState();
+    const state = engine.getState();
     const camera = state.exploration.camera;
     const delta: Vec3 = [
       point[0] - camera.target[0],
@@ -765,7 +1525,7 @@ export class Viewer {
         camera.position[2] + delta[2],
       ] as Vec3,
     };
-    galavi.setState(state);
+    engine.setState(state);
     this._focus = [...point] as Vec3;
   }
 
@@ -891,7 +1651,7 @@ export class Viewer {
     if (this._destroyed) return;
     this._destroyed = true;
     ++this._revision; // supersede any in-flight open/transition
-    this._teardownGalavi();
+    this._teardownEngine();
     this._removeOwnedDom();
     this._status = "idle";
     this._error = undefined;
@@ -924,31 +1684,31 @@ export class Viewer {
     this._ready = ready;
   }
 
-  private _teardownGalavi(): void {
+  private _teardownEngine(): void {
     this._unsubscribe?.();
     this._unsubscribe = undefined;
-    const galavi = this._galavi;
-    this._galavi = undefined;
+    const engine = this._engine;
+    this._engine = undefined;
     this._liveOverlays.clear();
-    galavi?.destroy();
+    engine?.destroy();
   }
 
   /**
-   * Rebuild the low-level scene for `mode`: destroy the current Galavi,
-   * translate the viewer state into a fresh GalaviConfig (§15.5), and
-   * delegate creation/mounting to `createGalavi`. `focus` is the physical
+   * Rebuild the low-level scene for `mode`: destroy the current ViewerEngine,
+   * translate the viewer state into a fresh ViewerEngineConfig (§15.5), and
+   * delegate creation/mounting to `createViewerEngine`. `focus` is the physical
    * point to preserve (mode transitions); undefined fits the dataset bounds.
    */
   private async _rebuild(revision: number, mode: ResolvedViewerMode, focus: Vec3 | undefined): Promise<void> {
     this._status = "loading";
-    this._teardownGalavi();
+    this._teardownEngine();
 
-    let galavi: Galavi;
-    let config: GalaviConfig;
+    let engine: ViewerEngine;
+    let config: ViewerEngineConfig;
     try {
       const canvases = this._ensureCanvases(mode);
-      config = this._buildGalaviConfig(mode, canvases, focus);
-      galavi = await createGalavi(config);
+      config = this._buildViewerEngineConfig(mode, canvases, focus);
+      engine = await createViewerEngine(config);
     } catch (err) {
       if (this._isCurrent(revision)) {
         this._error = err;
@@ -956,26 +1716,26 @@ export class Viewer {
       }
       throw err;
     }
-    this._assertCurrent(revision, "mode transition", () => galavi.destroy());
-    this._galavi = galavi;
+    this._assertCurrent(revision, "mode transition", () => engine.destroy());
+    this._engine = engine;
     this._resolvedMode = mode;
     this._pendingMode = mode;
-    this._focus = [...galavi.getState().exploration.camera.target] as Vec3;
-    this._unsubscribe = galavi.subscribe((state) => {
+    this._focus = [...engine.getState().exploration.camera.target] as Vec3;
+    this._unsubscribe = engine.subscribe((state) => {
       this._focus = [...state.exploration.camera.target] as Vec3;
     });
     // Zip the built overlay keys onto the live instances (createView
     // instantiates in Object.entries order).
     for (const { id } of viewEntriesForMode(mode)) {
       const keys = Object.keys(config.views[id].overlays ?? {});
-      const instances = galavi.view(id).base.getOverlays();
+      const instances = engine.view(id).base.getOverlays();
       const byType = new Map<string, BaseOverlay>();
       keys.forEach((type, i) => byType.set(type, instances[i]));
       this._liveOverlays.set(id, byType);
     }
 
     const activeViewId = mode === "quad" ? QUAD_PLANES[0].id : MAIN_VIEW_ID;
-    galavi.setActiveView(activeViewId);
+    engine.setActiveView(activeViewId);
 
     // Slice layers default to the center slice; a preserved focus must show
     // the slice AT the focus (DX-L2 focus preservation covers what is shown,
@@ -985,7 +1745,7 @@ export class Viewer {
     // Surface any layer load failure with DX-M2 semantics. Layers carry the
     // dataset's explicit pyramid/fetch, so they report ready immediately —
     // this is the guard that keeps `open`'s "resolves ready" contract honest.
-    const view = galavi.view(activeViewId);
+    const view = engine.view(activeViewId);
     for (const id of this._layerIdsForMode(mode)) {
       const status = view.getLayerStatus(id);
       if (status?.status === "error") {
@@ -1084,8 +1844,8 @@ export class Viewer {
    * focus and explicit `setSlicePoint` calls both go through here.
    */
   private _syncSliceLayers(mode: ResolvedViewerMode, point: Vec3): void {
-    const galavi = this._galavi;
-    if (!galavi || mode === "volume") return;
+    const engine = this._engine;
+    if (!engine || mode === "volume") return;
     const dataset = this._requireDataset();
     const spacing = dataset.physical.spatial.spacing ?? [1, 1, 1];
     const origin = dataset.physical.spatial.origin ?? [0, 0, 0];
@@ -1098,7 +1858,7 @@ export class Viewer {
       const through = resolveAxes(axes)[2];
       const index = Math.round((point[through] - origin[through]) / spacing[through]);
       for (const channel of dataset.channels) {
-        galavi.layer(`${prefix}-c${channel.index}`)?.setOptions({ sliceIndex: index });
+        engine.layer(`${prefix}-c${channel.index}`)?.setOptions({ sliceIndex: index });
       }
     }
   }
@@ -1157,11 +1917,11 @@ export class Viewer {
     return camera;
   }
 
-  private _buildGalaviConfig(
+  private _buildViewerEngineConfig(
     mode: ResolvedViewerMode,
     canvases: Record<string, HTMLCanvasElement>,
     focus: Vec3 | undefined,
-  ): GalaviConfig {
+  ): ViewerEngineConfig {
     const dataset = this._requireDataset();
     const channels = this._effectiveChannels(mode);
     // Layer config (not runtime mutation): the mode's declared transform is
@@ -1254,9 +2014,9 @@ export class Viewer {
   // === Live application (imperative paths) ===
 
   private _applyChannelLive(index: number): void {
-    const galavi = this._galavi;
+    const engine = this._engine;
     const mode = this._resolvedMode;
-    if (!galavi || !mode) return;
+    if (!engine || !mode) return;
     const channel = this._effectiveChannels(mode).find((c) => c.index === index)!;
     const render: Partial<Render> = {
       visible        : channel.visible,
@@ -1264,10 +2024,10 @@ export class Viewer {
       contrastLimits : [...channel.contrast] as [number, number],
     };
     for (const prefix of layerPrefixesForMode(mode)) {
-      galavi.layer(`${prefix}-c${index}`)?.setRender(render);
+      engine.layer(`${prefix}-c${index}`)?.setRender(render);
     }
     // Channel labels live in the shared physical space.
-    const state = galavi.getState();
+    const state = engine.getState();
     if (state.physical?.channels) {
       state.physical = {
         ...state.physical,
@@ -1276,14 +2036,14 @@ export class Viewer {
           names: this._effectiveChannels(mode).map((c) => c.label),
         },
       };
-      galavi.setState(state);
+      engine.setState(state);
     }
   }
 
   private _applyControlsLive(): void {
-    const galavi = this._galavi;
+    const engine = this._engine;
     const mode = this._resolvedMode;
-    if (!galavi || !mode) return;
+    if (!engine || !mode) return;
     for (const { id, kind } of viewEntriesForMode(mode)) {
       const options = this._controlsFor(mode, kind);
       const controls: BaseControl[] = [];
@@ -1291,17 +2051,17 @@ export class Viewer {
         if (!opts) continue;
         controls.push(controlRegistry.create(type, `viewer-${id}-${type}`, opts as Record<string, unknown>));
       }
-      galavi.view(id).base.setControls(controls);
+      engine.view(id).base.setControls(controls);
     }
   }
 
   private _applyToolLive(name: ViewerToolName): void {
-    const galavi = this._galavi;
+    const engine = this._engine;
     const mode = this._resolvedMode;
-    if (!galavi || !mode) return;
+    if (!engine || !mode) return;
     for (const { id, kind } of viewEntriesForMode(mode)) {
       const desired = this._overlaysFor(mode, kind);
-      const base = galavi.view(id).base;
+      const base = engine.view(id).base;
       const live = this._liveOverlays.get(id) ?? new Map<string, BaseOverlay>();
       this._liveOverlays.set(id, live);
       for (const type of toolOverlayTypes(name)) {
@@ -1330,7 +2090,7 @@ export class Viewer {
         }
       }
     }
-    galavi.requestRender();
+    engine.requestRender();
   }
 
   private _defaultControlsConfig(): ViewerControlsConfig {

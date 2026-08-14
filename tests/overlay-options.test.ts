@@ -8,7 +8,7 @@
  * receive their options verbatim through the same path.
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { createGalavi, type Galavi } from "../src/main";
+import { createViewerEngine, type ViewerEngine } from "../src/viewer";
 import { registerOverlay } from "../src/registry";
 import { BaseOverlay } from "../src/overlay";
 import type { State, ViewConfig } from "../src/types";
@@ -38,7 +38,7 @@ const initialState: State = {
 };
 
 describe("setOverlayOptions typing (compile-time)", () => {
-  let galavi: Galavi | undefined;
+  let engine: ViewerEngine | undefined;
 
   beforeEach(() => {
     vi.stubGlobal("requestAnimationFrame", () => 0);
@@ -46,17 +46,17 @@ describe("setOverlayOptions typing (compile-time)", () => {
   });
 
   afterEach(() => {
-    galavi?.destroy();
-    galavi = undefined;
+    engine?.destroy();
+    engine = undefined;
     vi.unstubAllGlobals();
   });
 
   test("built-in keys are typed; custom types keep the escape hatch", async () => {
-    galavi = await createGalavi({
+    engine = await createViewerEngine({
       state : initialState,
       views : { main: { type: "volume", layers: [] } },
     });
-    const view = galavi.view("main");
+    const view = engine.view("main");
 
     // Built-in overlay: exact options bag.
     view.setOverlayOptions("crosshair", { visible: true, position: [0, 0, 0], lineWidth: 2 });
@@ -98,7 +98,7 @@ describe("setOverlayOptions typing (compile-time)", () => {
 });
 
 describe("setOverlayOptions runtime pass-through", () => {
-  let galavi: Galavi | undefined;
+  let engine: ViewerEngine | undefined;
 
   beforeEach(() => {
     vi.stubGlobal("requestAnimationFrame", () => 0);
@@ -106,13 +106,13 @@ describe("setOverlayOptions runtime pass-through", () => {
   });
 
   afterEach(() => {
-    galavi?.destroy();
-    galavi = undefined;
+    engine?.destroy();
+    engine = undefined;
     vi.unstubAllGlobals();
   });
 
   test("custom overlay types receive their options verbatim", async () => {
-    galavi = await createGalavi({
+    engine = await createViewerEngine({
       state : initialState,
       views : {
         main: {
@@ -122,10 +122,10 @@ describe("setOverlayOptions runtime pass-through", () => {
         },
       },
     });
-    const overlay = galavi.view("main").base.getOverlays()[0] as RecorderOverlay;
+    const overlay = engine.view("main").base.getOverlays()[0] as RecorderOverlay;
     expect(overlay.received).toEqual({ initial: true });
 
-    galavi.view("main").setOverlayOptions("test-recorder", { custom: 42 });
+    engine.view("main").setOverlayOptions("test-recorder", { custom: 42 });
     expect(overlay.received).toEqual({ custom: 42 });
   });
 });

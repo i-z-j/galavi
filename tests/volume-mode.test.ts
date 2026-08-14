@@ -7,7 +7,7 @@
  * update that never touches geometryVersion (no pipeline rebuild).
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { createGalavi, type Galavi } from "../src/index";
+import { createViewerEngine, type ViewerEngine } from "../src/index";
 import {
   VolumeLayer,
   VolumeLayerParams,
@@ -104,8 +104,8 @@ describe("volume render mode", () => {
   });
 });
 
-describe("setRender({ volumeProjection }) through a Galavi instance", () => {
-  let galavi: Galavi | undefined;
+describe("setRender({ volumeProjection }) through a ViewerEngine instance", () => {
+  let engine: ViewerEngine | undefined;
 
   beforeEach(() => {
     vi.stubGlobal("requestAnimationFrame", () => 0);
@@ -113,13 +113,13 @@ describe("setRender({ volumeProjection }) through a Galavi instance", () => {
   });
 
   afterEach(() => {
-    galavi?.destroy();
-    galavi = undefined;
+    engine?.destroy();
+    engine = undefined;
     vi.unstubAllGlobals();
   });
 
   test("propagates via the render-config path", async () => {
-    galavi = await createGalavi({
+    engine = await createViewerEngine({
       state: {
         layers      : [{ id: "v", type: "volume" }],
         exploration : {
@@ -134,17 +134,17 @@ describe("setRender({ volumeProjection }) through a Galavi instance", () => {
       views: { main: { type: "volume", layers: ["v"] } },
     });
 
-    galavi.layer("v")!.setRender({ volumeProjection: "minip" });
-    expect(galavi.layer("v")!.config.render?.volumeProjection).toBe("minip");
+    engine.layer("v")!.setRender({ volumeProjection: "minip" });
+    expect(engine.layer("v")!.config.render?.volumeProjection).toBe("minip");
 
     // The state entry feeds the layer through the standard applyConfig path.
-    const desc = galavi.getState().layers.find((l) => l.id === "v")!;
-    const layer = galavi.view("main").getLayer("v") as VolumeLayer;
+    const desc = engine.getState().layers.find((l) => l.id === "v")!;
+    const layer = engine.view("main").getLayer("v") as VolumeLayer;
     layer.applyConfig(desc);
     expect(paramsMode(layer)).toBe(1);
 
-    galavi.layer("v")!.setRender({ volumeProjection: "mean" });
-    layer.applyConfig(galavi.getState().layers.find((l) => l.id === "v")!);
+    engine.layer("v")!.setRender({ volumeProjection: "mean" });
+    layer.applyConfig(engine.getState().layers.find((l) => l.id === "v")!);
     expect(paramsMode(layer)).toBe(2);
     expect(layer.geometryVersion).toBe(0);
   });
