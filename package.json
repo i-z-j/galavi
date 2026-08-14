@@ -19,6 +19,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/galavi.js"
+    },
+    "./ome-zarr": {
+      "types": "./dist/ome-zarr.d.ts",
+      "import": "./dist/ome-zarr.js"
     }
   },
   "files": [
@@ -36,6 +40,14 @@
   "dependencies": {
     "wgpu-matrix": "^3.4.0"
   },
+  "peerDependencies": {
+    "zarrita": "^0.6.0"
+  },
+  "peerDependenciesMeta": {
+    "zarrita": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@webgpu/types": "^0.1.65",
     "bun-types": "^1.2.22",
@@ -43,6 +55,7 @@
     "typescript": "^5.5.3",
     "vite": "^5.4.1",
     "vite-plugin-dts": "^4.5.0",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.10",
+    "zarrita": "^0.6.0"
   }
 }

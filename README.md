@@ -7,7 +7,7 @@ Galavi is a WebGPU visualization library for shared-state scientific viewers. It
 ## Features
 
 - **High-level `Viewer` API** — `createViewer(element, config)` gives you a complete scientific viewer in one call: dataset session, modes, channels, camera fit, controls/tools, and loading status from a single JSON-serializable `ViewerConfig`.
-- **`openDataset` resolver registry** — format-neutral resolved-dataset contract (pyramid, physical space, channels, capabilities), resolved once per source and shared across layers.
+- **`openDataset` dataset-kind registry** — format-neutral dataset contract (pyramid, physical space, channels, capabilities); kinds self-register via `registerDataset` (`"image"` comes from the `galavi/ome-zarr` subpath, `"mesh"` is built in).
 - WebGPU-native rendering for multi-view scientific scenes.
 - Shared, serializable `State` model — physical space, layers, exploration — diffable across view layouts.
 - Tile-based multi-resolution loading for large OME-Zarr and similar pyramidal datasets, with an automatic bounded volume tile-budget policy.
@@ -16,42 +16,40 @@ Galavi is a WebGPU visualization library for shared-state scientific viewers. It
 - Automatic physical-scale resolution selection with coarse-first loading and dynamic visible storage chunks.
 - Built-in overlays: `crosshair`, `ruler`, `roiselector`, `magnifier-2d`, `magnifier-3d`, `foldablepanel` — bound to a live view, with typed option bags (`OverlayOptionsMap`).
 - Built-in layers: volume, slice, surface, shape, points, network, segmentation, vectors, tracks.
-- HCS support via `@galavi/ome-zarr-adapter`'s typed `openOMEZarrPlate` (plate/well/field hierarchy with ready-to-open source descriptors).
-- FUI overlay theme, customizable via `GalaviConfig.theme` and consumable by apps through `--galavi-*` CSS custom properties.
+- HCS support via the `galavi/ome-zarr` subpath's typed `openOMEZarrPlate` (plate/well/field hierarchy with ready-to-open dataset configs).
+- FUI overlay theme, customizable via `ViewerConfig.theme` and consumable by apps through `--galavi-*` CSS custom properties.
 - Extensible registries for layers, views, controls, and overlays — add your own without forking.
 - Framework-agnostic canvas mounting; works with Vue, React, vanilla, etc.
 
 ## Install
 
 ```bash
-npm install galavi
+npm install galavi zarrita
 # or
-bun add galavi
+bun add galavi zarrita
 ```
 
 ## Quickstart
 
-One import, one call — a complete viewer against an OME-Zarr store:
+Two imports, one call — a complete viewer against an OME-Zarr store:
 
 ```ts
 import { createViewer } from "galavi";
-import { registerOMEZarrSource } from "@galavi/ome-zarr-adapter";
-
-registerOMEZarrSource(); // once, at startup
+import "galavi/ome-zarr"; // registers the "image" dataset kind (OME-Zarr)
 
 const viewer = await createViewer("#app", {
-  source: { type: "ome-zarr", url: "https://server/data.zarr" },
+  dataset: { type: "image", source: "https://server/data.zarr" },
 });
 ```
 
 Every config key has an imperative equivalent: `viewer.mode = "volume"`,
 `viewer.projection = "mip"`, `viewer.channel(1).configure({ contrast: [0.02, 0.2] })`,
-`viewer.tool("ruler").enable()`, `await viewer.open(source)`.
+`viewer.tool("ruler").enable()`, `await viewer.open(dataset)`.
 
-Use the low-level **`createGalavi`** API instead when you need what the Viewer
-does not own: arbitrary multi-view composition, custom registered
+Use the low-level **`createViewerEngine`** API instead when you need what the
+Viewer does not own: arbitrary multi-view composition, custom registered
 layers/controls/overlays/views, non-image layers, or explicit scene-`State`
-serialization. `viewer.galavi` is the escape hatch for one-off advanced
+serialization. `viewer.engine` is the escape hatch for one-off advanced
 operations. See [DESIGN.md](./DESIGN.md) for the layering and ownership model.
 
 ## References

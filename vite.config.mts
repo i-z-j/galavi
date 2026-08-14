@@ -13,13 +13,17 @@ export default defineConfig({
     minify: false,
     sourcemap: true,
     lib: {
-      entry: "src/index.ts",
+      entry: {
+        index: "src/index.ts",
+        "ome-zarr": "src/dataset/ome-zarr.ts",
+      },
       formats: ["es"],
-      fileName: "galavi",
+      fileName: (_format, entryName) =>
+        entryName === "index" ? "galavi.js" : `${entryName}.js`,
     },
     outDir: "dist",
     rollupOptions: {
-      external: ["wgpu-matrix"],
+      external: ["wgpu-matrix", "zarrita"],
     },
   },
 });
