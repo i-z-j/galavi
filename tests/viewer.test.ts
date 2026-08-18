@@ -12,16 +12,16 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   createViewer,
   Dataset,
+  MeshDataset,
   ViewerEngine,
   getDatasetCapabilities,
   registerDataset,
   ViewerSupersededError,
   type DatasetConfig,
-  type DatasetDefaults,
   type DefaultLayersOptions,
   type Viewer,
   type ViewerConfig,
-} from "../src/index";
+} from "../src/advanced";
 import { datasetRegistry } from "../src/registry";
 import type { ImagePyramid, LayerConfig } from "../src/types";
 
@@ -30,6 +30,17 @@ import type { ImagePyramid, LayerConfig } from "../src/types";
 // ============================================================================
 
 const KIND = "viewer-stub";
+
+/**
+ * Test kinds own an exact config in the map, like any format package (the
+ * augmentation is compilation-wide; the runtime registration happens per
+ * test below).
+ */
+declare module "galavi" {
+  interface DatasetConfigMap {
+    "viewer-stub": { type: "viewer-stub"; source: string };
+  }
+}
 
 const PYRAMID_3D: ImagePyramid = {
   levels: [
@@ -53,6 +64,8 @@ const DESC_STRIDED: DatasetConfig = { type: KIND, source: "mem://strided" };
 const DESC_ALL_ACTIVE: DatasetConfig = { type: KIND, source: "mem://all-active" };
 const DESC_OTHER: DatasetConfig = { type: KIND, source: "mem://other" };
 const DESC_FAIL: DatasetConfig = { type: KIND, source: "mem://fail" };
+/** 3D pyramid with a synthetic slice-only presentation restriction. */
+const DESC_RESTRICTED: DatasetConfig = { type: KIND, source: "mem://restricted" };
 
 /**
  * Stub image dataset: reproduces the image-kind behavior these tests assert
@@ -81,18 +94,14 @@ class StubImageDataset extends Dataset {
       { index: 0, label: "a", color: "#00B0FF", contrast: [0, 1], visible: true },
       { index: 1, label: "b", color: "#FF3D3D", contrast: [0, 1], visible: allActive },
     ];
-    this.capabilities = getDatasetCapabilities(this.pyramid);
+    // The restricted fixture declares a slice-only presentation even though
+    // its pyramid is 3D — a synthetic restricted dataset.
+    this.capabilities = source === DESC_RESTRICTED.source
+      ? { modes: ["slice"], defaultMode: "slice" }
+      : getDatasetCapabilities(this.pyramid);
   }
 
   override dispose(): void {}
-
-  override deriveDefaults(): DatasetDefaults {
-    const caps = this.capabilities;
-    return {
-      mode      : caps.zDepth > 1 && caps.supports3D && caps.supportsVolumePreview ? "volume" : "slice",
-      selection : { ...this.defaultSelection },
-    };
-  }
 
   override createDefaultLayers(options: DefaultLayersOptions): LayerConfig[] {
     const { view, prefix, axes, channels, projection, transform } = options;
@@ -313,7 +322,8 @@ describe("open translation to the low-level scene model", () => {
     expect(engine).toBeInstanceOf(ViewerEngine);
     expect(viewer.status).toBe("ready");
     expect(viewer.resolvedMode).toBe("volume");
-    expect(viewer.availableModes).toEqual(["slice", "volume", "quad"]);
+    // Canvas target: the dataset's modes minus quad (it needs a container).
+    expect(viewer.availableModes).toEqual(["slice", "volume"]);
     expect(viewer.dataset?.config).toEqual(DESC_3D);
 
     const state = engine.getState();
@@ -368,7 +378,10 @@ describe("open translation to the low-level scene model", () => {
 
   test("z-chunk=1 pyramid in auto mode → volume via the bounded-preview capability", async () => {
     const viewer = await makeViewer(makeFakeCanvas(), { dataset: DESC_STRIDED });
-    expect(viewer.dataset?.capabilities).toMatchObject({ supports3D: true, supportsVolumePreview: true });
+    expect(viewer.dataset?.capabilities).toMatchObject({
+      modes: ["slice", "volume", "quad"],
+      defaultMode: "volume",
+    });
     expect(viewer.resolvedMode).toBe("volume");
     const layer = layerOf(viewer, "volume-c0");
     expect(layer.options).not.toHaveProperty("maxPoolSize");
@@ -422,7 +435,10 @@ describe("open status semantics", () => {
 
   test("unknown dataset kind rejects with the actionable registry error", async () => {
     const viewer = await makeViewer();
-    await expect(viewer.open({ type: "nope", source: "mem://x" })).rejects.toThrow(
+    await expect(
+      // @ts-expect-error — "nope" is not a registered loader key
+      viewer.open({ type: "nope", source: "mem://x" }),
+    ).rejects.toThrow(
       /Unknown dataset kind: "nope"/,
     );
     expect(viewer.status).toBe("error");
@@ -590,6 +606,105 @@ describe("mode transitions", () => {
   test("an invalid mode throws synchronously", async () => {
     const viewer = await makeViewer(makeFakeCanvas(), { dataset: DESC_3D });
     expect(() => { viewer.mode = "grid" as never; }).toThrow(/Invalid viewer mode/);
+  });
+});
+
+// ============================================================================
+// MODE CAPABILITIES (dataset modes ∩ target support)
+// ============================================================================
+
+describe("mode capabilities", () => {
+  const OBJ = [
+    "# tetrahedron",
+    "v 0 0 0",
+    "v 10 0 0",
+    "v 0 20 0",
+    "v 0 0 30",
+    "f 1 2 3",
+    "f 1 2 4",
+    "f 1 3 4",
+    "f 2 3 4",
+    "",
+  ].join("\n");
+
+  test('`mode: "auto"` resolves to capabilities.defaultMode exactly', async () => {
+    // 3D pyramid, but the dataset declares a slice-only presentation — auto
+    // must not second-guess it with pyramid facts.
+    const restricted = await makeViewer(makeFakeCanvas(), { dataset: DESC_RESTRICTED });
+    expect(restricted.dataset?.capabilities).toEqual({ modes: ["slice"], defaultMode: "slice" });
+    expect(restricted.resolvedMode).toBe("slice");
+    expect(restricted.availableModes).toEqual(["slice"]);
+
+    // 2D/3D image defaults (covered end-to-end above): slice / volume.
+    const image2d = await makeViewer(makeFakeCanvas(), { dataset: DESC_2D });
+    expect(image2d.resolvedMode).toBe("slice");
+    const image3d = await makeViewer(makeFakeCanvas(), { dataset: DESC_3D });
+    expect(image3d.resolvedMode).toBe("volume");
+  });
+
+  test("an unsupported explicit mode rejects the open with an actionable error", async () => {
+    await expect(makeViewer(makeFakeCanvas(), { dataset: DESC_2D, mode: "volume" })).rejects.toThrow(
+      /Mode "volume" is not supported by dataset kind "viewer-stub" \(available: slice\)/,
+    );
+  });
+
+  test("assigning an unsupported mode throws before any teardown", async () => {
+    const viewer = await makeViewer(makeFakeCanvas(), { dataset: DESC_2D });
+    expect(viewer.resolvedMode).toBe("slice");
+    const engine = viewer.engine;
+
+    expect(() => { viewer.mode = "volume"; }).toThrow(
+      /Mode "volume" is not supported by dataset kind "viewer-stub" \(available: slice\)/,
+    );
+    // The rejected assignment left the running scene (and the recorded mode
+    // intent) untouched.
+    expect(viewer.engine).toBe(engine);
+    expect(viewer.resolvedMode).toBe("slice");
+    expect(viewer.mode).toBe("auto");
+    expect(viewer.status).toBe("ready");
+    await viewer.ready;
+  });
+
+  test("a canvas target excludes quad from the available modes", async () => {
+    const viewer = await makeViewer(makeFakeCanvas(), { dataset: DESC_3D });
+    expect(viewer.availableModes).toEqual(["slice", "volume"]);
+
+    const engine = viewer.engine;
+    expect(() => { viewer.mode = "quad"; }).toThrow(/quad.*requires a container element/);
+    expect(viewer.engine).toBe(engine);
+    expect(viewer.resolvedMode).toBe("volume");
+    expect(viewer.status).toBe("ready");
+  });
+
+  test("a container target intersects to all of a 3D dataset's modes", async () => {
+    const { container } = makeFakeContainer();
+    const viewer = await makeViewer(container, { dataset: DESC_3D });
+    expect(viewer.availableModes).toEqual(["slice", "volume", "quad"]);
+  });
+
+  test("a mesh through createViewer offers volume only", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true, status: 200, text: async () => OBJ,
+    })));
+    const viewer = await makeViewer(makeFakeCanvas(), {
+      dataset: { type: "mesh", source: "mem://mesh.obj" },
+    });
+    expect(viewer.dataset).toBeInstanceOf(MeshDataset);
+    expect(viewer.resolvedMode).toBe("volume"); // auto → defaultMode
+    expect(viewer.availableModes).toEqual(["volume"]);
+    expect(viewer.engine!.getViewConfig("main")?.type).toBe("volume");
+    expect(layerOf(viewer, "volume-mesh").type).toBe("surface");
+
+    // Slice/quad are not buildable for a mesh — rejected synchronously, and
+    // the running scene survives the rejected assignments.
+    const engine = viewer.engine;
+    expect(() => { viewer.mode = "slice"; }).toThrow(
+      /Mode "slice" is not supported by dataset kind "mesh" \(available: volume\)/,
+    );
+    expect(() => { viewer.mode = "quad"; }).toThrow(/not supported by dataset kind "mesh"/);
+    expect(viewer.engine).toBe(engine);
+    expect(viewer.resolvedMode).toBe("volume");
+    expect(viewer.status).toBe("ready");
   });
 });
 

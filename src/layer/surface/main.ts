@@ -306,11 +306,17 @@ export class SurfaceLayer extends BaseLayer {
     this.shadingMode        = render?.shading ?? (this.isWireframe ? "wireframe" : "surface");
   }
 
-  /** Initialize surface data (called by view after device is ready) */
+  /**
+   * Initialize surface data. Driven through the layer's single tracked load
+   * (`ensureLoaded`, ARCH-1) once the GPU device is ready — a rejection is
+   * recorded as `loadError` and signaled to every referencing view, so it
+   * must propagate, not be logged away.
+   */
   override async initAsync(): Promise<void> {
     if (this.isSurfaceLoaded) return;
 
-    // Load from source if available (custom fetch, urlTemplate, or plain GET)
+    // Load from source if available (pre-parsed geometry, custom fetch,
+    // urlTemplate, or plain GET)
     if (this.source) {
       await this.loadSurfaceFromSource();
     } else {
@@ -326,8 +332,15 @@ export class SurfaceLayer extends BaseLayer {
   }
 
   /**
-    * Update the data source and reload the surface.
-   * Compares URLs to avoid redundant reloads.
+   * Update the data source and reload the surface.
+   * Compares source identity (url / urlTemplate / fetch / pyramid / geometry)
+   * to avoid redundant reloads.
+   *
+   * ARCH-1: the reload is a fresh tracked load — the settled `loadError` is
+   * cleared up front (status flips back to `"loading"`) and the new
+   * generation's waiters resolve or reject with the new outcome. The
+   * rejection is acknowledged here because the failure is already published
+   * through `loadError` and the render channel.
    */
   override setSource(source: Data): void {
     if (!sourceChanged(source, this.source)) return;
@@ -336,14 +349,22 @@ export class SurfaceLayer extends BaseLayer {
     this.isSurfaceLoaded  = false;
     this.surfaceGeometry  = undefined;
     this._aabb            = this.userBounds;
-    this.loadSurfaceFromSource();
+    void this.restartLoad().catch(() => {});
   }
 
-  /** Load surface data from source */
+  /**
+   * Load surface data from source. Adopts pre-parsed `Data.geometry` when
+   * present (dataset handoff — no network request, no second parse);
+   * otherwise fetches text via `fetch`/`url` and parses it. Throws on
+   * failure — the tracked-load wrapper records it as `loadError`.
+   */
   private async loadSurfaceFromSource(): Promise<void> {
     if (!this.source || this.isSurfaceLoaded) return;
 
-    try {
+    const geometry = optSurfaceGeometry(this.source.geometry);
+    if (geometry) {
+      this.setSurfaceGeometry(geometry);
+    } else {
       let surfaceText: string;
 
       if (this.source.fetch) {
@@ -356,19 +377,14 @@ export class SurfaceLayer extends BaseLayer {
       }
 
       this.loadOBJ(surfaceText);
+    }
 
-      this.isSurfaceLoaded = true;
-      this.geometryVersion++;
+    this.isSurfaceLoaded = true;
+    this.geometryVersion++;
 
-      // Normalize surface to [0,1]³ space based on size
-      if (this.surfaceGeometry && this.size) {
-        this.normalizeSurface();
-      }
-
-      // Notify views so async source reloads rebuild GPU state promptly.
-      this.requestRender();
-    } catch (err) {
-      console.error(`[SurfaceLayer] Failed to load surface:`, err);
+    // Normalize surface to [0,1]³ space based on size
+    if (this.surfaceGeometry && this.size) {
+      this.normalizeSurface();
     }
   }
 
@@ -556,4 +572,16 @@ function optAABB(value: unknown): AABB | undefined {
   const min = optVec3(candidate.min);
   const max = optVec3(candidate.max);
   return min && max ? { min, max } : undefined;
+}
+
+/**
+ * Structural check for pre-parsed `Data.geometry` (config-boundary policy: a
+ * wrong-typed value reads as absent and the layer falls back to fetching).
+ */
+function optSurfaceGeometry(value: unknown): SurfaceGeometry | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const candidate = value as Partial<SurfaceGeometry>;
+  if (!(candidate.positions instanceof Float32Array)) return undefined;
+  if (typeof candidate.vertexCount !== "number") return undefined;
+  return candidate as SurfaceGeometry;
 }

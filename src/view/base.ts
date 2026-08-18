@@ -207,14 +207,7 @@ export abstract class BaseView {
   }
 
   setDevice(device: GPUDevice): void {
-    if (this.device === device) return;
-    const wasUnset = !this.device;
     this.device = device;
-    if (wasUnset) {
-      for (const layer of this.layerEntries) {
-        this.initLayerGpu(layer);
-      }
-    }
   }
 
   async mount(canvas: HTMLCanvasElement): Promise<void> {
@@ -320,7 +313,8 @@ export abstract class BaseView {
    * Semantics:
    * - Resolves immediately when the layer is already ready.
    * - Otherwise pends until the layer signals through its render-request
-   *   channel (or async init) while `isReady` holds. If the layer's source
+   *   channel (async tile/geometry work, or the engine's tracked-load
+   *   fan-out, ARCH-1) while `isReady` holds. If the layer's source
    *   reloads before resolution — flipping `isReady` back to false — the wait
    *   simply continues until the layer becomes ready for the new data.
    * - A settled promise is unaffected by later source reloads; callers that
@@ -364,8 +358,12 @@ export abstract class BaseView {
   /**
    * Settle pending readiness waiters after a layer signal: resolve when the
    * layer is ready, reject with the recorded load error when it failed.
+   *
+   * ARCH-1: called by the owning ViewerEngine's fan-out — the layer's
+   * render-request channel is attached once at the engine and each signal
+   * reaches every referencing view through this method.
    */
-  private notifyLayerSignal(layer: BaseLayer): void {
+  notifyLayerSignal(layer: BaseLayer): void {
     const waiters = this.readinessWaiters.get(layer);
     if (!waiters) return;
     if (layer.loadStatus === "error") {
@@ -379,6 +377,19 @@ export abstract class BaseView {
     for (const waiter of waiters) waiter.resolve(layer);
   }
 
+  /**
+   * Engine fan-out entry (ARCH-1): the shared runtime layer's tracked async
+   * load settled (successfully, or with a recorded `loadError`). Rebuilds
+   * this view's per-layer GPU pipelines (new geometry/textures become
+   * drawable) and settles this view's readiness waiters. No-op when the
+   * layer is not part of this view.
+   */
+  handleLayerLoadSettled(layer: BaseLayer): void {
+    if (!this.layerEntries.includes(layer)) return;
+    this.onLayersChanged();
+    this.notifyLayerSignal(layer);
+  }
+
   /** Reject pending readiness waiters (layer removed, view destroyed). */
   private failReadinessWaiters(layer: BaseLayer, err: unknown): void {
     const waiters = this.readinessWaiters.get(layer);
@@ -390,28 +401,12 @@ export abstract class BaseView {
   // === Layer Management ===
 
   /**
-   * Wire a layer's render-request channel and (if device is ready) initialize
-   * its async data. Tile residency is owned by the view-side ImagePipeline,
-   * so layers no longer touch the GPU during attach.
+   * Layer instances are owned by the ViewerEngine (ARCH-1): one runtime
+   * instance per state-layer ID, created at engine construction and shared
+   * by every referencing view. View membership management below never wires
+   * or unwires the layer's render-request channel — the engine attaches it
+   * once and fans signals out to every referencing view.
    */
-  private wireLayer(layer: BaseLayer): void {
-    layer.attach({
-      requestRender: () => {
-        this.engine?.requestRender();
-        this.notifyLayerSignal(layer);
-      },
-    });
-    if (this.device) this.initLayerGpu(layer);
-  }
-
-  private initLayerGpu(layer: BaseLayer): void {
-    if (!this.device) return;
-    void layer.initAsync().then(() => {
-      this.onLayersChanged();
-      this.engine?.requestRender();
-      this.notifyLayerSignal(layer);
-    });
-  }
 
   /**
    * Called when the layer set changes; default invalidates the shared
@@ -424,7 +419,6 @@ export abstract class BaseView {
   addLayer(layer: BaseLayer): void {
     if (!this.layerEntries.includes(layer)) {
       this.layerEntries.push(layer);
-      this.wireLayer(layer);
       if (this.device) this.onLayersChanged();
     }
   }
@@ -433,7 +427,6 @@ export abstract class BaseView {
     const idx = this.layerEntries.indexOf(layer);
     if (idx >= 0) {
       this.layerEntries.splice(idx, 1);
-      layer.detach();
       this.failReadinessWaiters(
         layer,
         new Error(`Layer "${layer.id}" removed from view "${this.id}"`),
@@ -445,7 +438,6 @@ export abstract class BaseView {
   setLayers(entries: BaseLayer[]): void {
     for (const old of this.layerEntries) {
       if (!entries.includes(old)) {
-        old.detach();
         this.failReadinessWaiters(
           old,
           new Error(`Layer "${old.id}" removed from view "${this.id}"`),
@@ -453,9 +445,6 @@ export abstract class BaseView {
       }
     }
     this.layerEntries = [...entries];
-    for (const layer of this.layerEntries) {
-      this.wireLayer(layer);
-    }
     if (this.device) this.onLayersChanged();
   }
 

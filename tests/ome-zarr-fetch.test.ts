@@ -10,7 +10,7 @@
  *   - custom fetch injection (options.fetch) routing every store request
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { floatToFloat16 } from "../src/index";
+import { floatToFloat16 } from "../src/advanced";
 import { fetch2DPlane, openOMEZarr } from "../src/dataset/ome-zarr";
 
 const URL_BASE = "https://example.test/data.ome.zarr";

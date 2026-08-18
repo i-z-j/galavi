@@ -20,8 +20,12 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/galavi.js"
     },
+    "./advanced": {
+      "types": "./dist/advanced.d.ts",
+      "import": "./dist/advanced.js"
+    },
     "./ome-zarr": {
-      "types": "./dist/ome-zarr.d.ts",
+      "types": "./dist/dataset/ome-zarr.d.ts",
       "import": "./dist/ome-zarr.js"
     }
   },
@@ -29,7 +33,9 @@
     "dist",
     "LICENSE"
   ],
-  "sideEffects": true,
+  "sideEffects": [
+    "./dist/ome-zarr.js"
+  ],
   "scripts": {
     "build": "vite build",
     "test": "vitest run",
@@ -38,15 +44,8 @@
     "prepublishOnly": "bun run typecheck && bun run test && bun run build"
   },
   "dependencies": {
-    "wgpu-matrix": "^3.4.0"
-  },
-  "peerDependencies": {
+    "wgpu-matrix": "^3.4.0",
     "zarrita": "^0.6.0"
-  },
-  "peerDependenciesMeta": {
-    "zarrita": {
-      "optional": true
-    }
   },
   "devDependencies": {
     "@webgpu/types": "^0.1.65",
@@ -55,7 +54,6 @@
     "typescript": "^5.5.3",
     "vite": "^5.4.1",
     "vite-plugin-dts": "^4.5.0",
-    "vitest": "^4.1.10",
-    "zarrita": "^0.6.0"
+    "vitest": "^4.1.10"
   }
 }

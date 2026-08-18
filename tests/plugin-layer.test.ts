@@ -15,7 +15,7 @@ import {
   type LayerConfig,
   type LayerParams,
   type Shader,
-} from "../src/index";
+} from "../src/advanced";
 import { layerRegistry } from "../src/registry";
 
 /** Minimal plugin-style layer, written only against package-root exports. */

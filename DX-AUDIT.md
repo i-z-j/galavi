@@ -476,3 +476,104 @@ galavi 227, galavi-ome-zarr-adapter 78, galavi-examples 49, cerevi-web 40.
 | Volume tile budgets | example-local `makeVolumeSource` + `maxPoolSize` math on every volume path | automatic core policy (`planVolumePreview`); common paths carry no `maxPoolSize` |
 | Common paths | raw `getState`/`setState` mutations for camera/channel operations | no `getState`/`setState` on any common example path (typed helpers and Viewer operations only) |
 | 2026-08-11 | DX-M1 (Cerevi side, decision 14) | adopted (partial) | cerevi-web's `buildSetupContext` now normalizes the volume store through the adapter's `resolvedDatasetFromOMEZarr` into a `SetupContext.dataset` (one metadata open retained — `openOMEZarr` output feeds the resolver directly, no second open): channel labels/colors/contrast, default selection, physical space, and the volume layer's pyramid/fetch/`selection` spread all come from the resolved dataset, deleting Cerevi's duplicate `findChannelDim`/`buildChannels`/manual `getPhysicalSpace` wiring in `context.ts`/`layer-factories.ts`/`view-factories.ts`. Deliberately retained locally: specimen/mesh metadata and mode-file routing, precomputed per-plane slice sources (`fetch2DPlane` per storage plane with its own contrast metadata), anatomical orientation (`sliceDefs`/`storageReversed`), and all multi-source/multi-view/mesh composition on `createGalavi` (the four mode layouts do not fit `Viewer.mode`; typed `setOverlayOptions` already compiled unchanged per DX-Q4). Regression tests added for dataset metadata exposure and nested `selection.c` (default-selection spread with only `c` overridden). |
+
+---
+
+## Corrections — 2026-08-17 (superseded-design notice)
+
+**Status of this document:** the entries above are a dated decision log and are
+**not rewritten**. Several of them describe a design that has since been
+replaced. This section records which entries are superseded and what actually
+shipped, so no entry above is read as current API. The current architecture is
+specified in `DESIGN.md` (rewritten 2026-08-17); the follow-up review driving
+the replacement is `../review-0.md` (audit date 2026-08-16).
+
+### Entries describing the superseded source-resolver design
+
+Everything below is **historical** — the named mechanisms were removed with no
+aliases:
+
+- **DX-M1 (core mechanism).** The `ResolvedDataset` contract,
+  `registerDatasetResolver` / `datasetResolverRegistry`, the per-source-identity
+  resolution cache (`datasetCacheKey`, `invalidateDataset`,
+  `invalidateAllDatasets`), `SourceDescriptor`-based `openDataset(source)`, and
+  the adapter-side `registerOMEZarrSource()` registration entry were replaced
+  by the Dataset class contract: kinds register via `registerDataset(kind,
+  factory)` keyed on an explicit `DatasetConfigMap` entry (module
+  augmentation); `openDataset(config)` constructs and loads a **fresh**
+  `Dataset` per call with **no cache** (disposal is the caller's job;
+  `viewer.open(dataset)` adopts a pre-opened instance with ownership transfer);
+  duplicate kind registration throws. `getDatasetCapabilities(pyramid)`
+  survives, now returning format-neutral `{ modes, defaultMode }` capabilities
+  instead of image-shaped facts.
+- **DX-M2 (framing only).** The load-status channel landed as described and is
+  current (`loadStatus`/`loadError`, `getLayerStatus`, `whenLayerReady`
+  rejection). What is gone is the *source-descriptor* framing: per-layer
+  `Data.source` resolution through `sourceRegistry`/`registerSource` no longer
+  exists — layers consume explicit `pyramid`/`fetch`/`geometry` from a Dataset,
+  and failures are dataset/layer load failures.
+- **DX-L1 (naming and composition).** The facade landed and survives, but:
+  the config key is `dataset` (not `source`); the escape hatch is
+  `viewer.engine` (not `viewer.galavi`); the low-level orchestrator is
+  `ViewerEngine`/`createViewerEngine` with `ViewerEngineConfig` (not
+  `Galavi`/`createGalavi`/`GalaviConfig` — removed completely, no aliases);
+  `open()` resolves with the `Dataset` (not `ResolvedDataset`). The facade now
+  also awaits every generated layer's structural readiness before
+  `viewer.ready` settles (ARCH-1), and high-level tool config is JSON-only —
+  functions throw with an actionable error (API-4).
+- **DX-L2.** Current, with the rename: transitions destroy/recreate the
+  `ViewerEngine`, not a "Galavi".
+- **DX-M5.** `openOMEZarrPlate` shipped as described but moved: it is exported
+  from the `galavi/ome-zarr` subpath, not a separate adapter package.
+- **DX-H1 and the adapter-package references** (the "Verified mechanisms"
+  header, DX-M5, decision-log rows): the standalone `@galavi/ome-zarr-adapter`
+  package is **decommissioned** (deprecated README, out of the workspace).
+  OME-Zarr support ships inside `galavi` as the `galavi/ome-zarr` subpath;
+  `zarrita` is a normal dependency of `galavi`, so `npm install galavi`
+  suffices. `@galavi/ome-tiff-adapter` survives, migrated to the new Dataset
+  contract (`registerDataset("ome-tiff", …)` + `DatasetConfigMap`
+  augmentation) as the multi-loader proof.
+- **Decision log and measurements table rows** mentioning `createGalavi`,
+  `viewer.galavi`, `ResolvedDataset`, `registerDatasetResolver`, or
+  `@galavi/ome-zarr-adapter` are accurate records of what landed on
+  2026-08-11 and are superseded per the above.
+- **`docs/plans/viewer-dataset-refactor-notes.md`** (2026-08-14) records the
+  intermediate refactor state: it still names the `"image"` dataset kind
+  (since renamed `"ome-zarr"`), `deriveDefaults()` (replaced by
+  `capabilities`), `zarrita` as an optional peer (now a normal dependency),
+  and package-wide `sideEffects` (now narrowed to the OME-Zarr entry). It
+  carries a historical-status banner.
+
+### What actually shipped (2026-08-17)
+
+- **Three package entries.** `galavi` (common: `createViewer`/`Viewer`, Viewer
+  config/status/event types, `openDataset`/`Dataset`/`DatasetConfig`/
+  `DatasetConfigMap`/`registerDataset`, common types, theme helpers);
+  `galavi/advanced` (`createViewerEngine`/`ViewerEngine`, `State`/`ViewConfig`/
+  `LayerConfig`/`LayerPatch`, `updateLayers`, registries, base + built-in
+  classes, callback-bearing overlay options, camera/tile/plugin utilities —
+  re-exporting the common root); `galavi/ome-zarr` (self-registers
+  `"ome-zarr"`; `openOMEZarrDataset`, `openOMEZarr`, `fetch2DPlane`, plate
+  helpers, `ImageDataset.info`/`OMEZarrInfo`).
+- **Typed loader identity.** `DatasetConfig` is the union of
+  `DatasetConfigMap` configs — wrong configs fail at compile time; duplicate
+  registration throws. Configs are `{ type: "ome-zarr" | "ome-tiff" | "mesh",
+  source }`. No `type: "image"` kind exists.
+- **Shared runtime layers and truthful readiness (ARCH-1).** The engine owns
+  one runtime `BaseLayer` per state-layer ID across views (per-view GPU
+  renderers remain), one tracked load per layer with recorded status/error,
+  and the Viewer awaits all generated layers' structural readiness — surface
+  failures reject `viewer.ready`/`whenLayerReady`, never swallowed.
+  `MeshDataset` hands parsed geometry to its surface layer (one fetch/parse).
+- **Ownership (API-5).** `openDataset(config)` results are caller-owned;
+  `viewer.open(dataset)` transfers ownership at invocation — the Viewer
+  disposes on supersession/replacement/rebuild-failure/`destroy()`.
+- **Events (API-4).** High-level tool config is JSON-only; ROI runtime events
+  ship as `viewer.on("roiChange" | "roiActiveChange", handler)` returning an
+  unsubscribe; callback-bearing overlay options remain on the low-level engine
+  path in `galavi/advanced`.
+- **Packaging.** `sideEffects` narrowed to the OME-Zarr entry; `zarrita` is a
+  normal dependency; no companion adapter install is required.
+
+Entries not listed above (DX-Q1–Q5, DX-M3, DX-M4, DX-M6 modulo the API-4
+amendment) describe mechanisms that are still current.

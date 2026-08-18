@@ -40,7 +40,8 @@ type BlendingMode = NonNullable<Render['blending']>;
  * - `"ready"`   — data is renderable (`isReady` holds).
  * - `"error"`   — a failure was recorded; see {@link BaseLayer.loadError}.
  *
- * `BaseLayer`'s default derives from `isReady`; layers with an optional
+ * `BaseLayer`'s default reports `"error"` from the recorded tracked-load
+ * failure and otherwise derives from `isReady`; layers with an optional
  * source (tiled image layers) override to also report `"idle"`.
  */
 export type LayerLoadStatus = "idle" | "loading" | "ready" | "error";
@@ -133,6 +134,16 @@ export interface LayerClass {
 // BASE LAYER
 // ============================================================================
 
+/**
+ * BaseLayer — pure-data layer abstraction used by view-owned renderers.
+ *
+ * ARCH-1 instance contract: the ViewerEngine creates ONE runtime instance per
+ * state-layer ID and shares it across every referencing view (per-view GPU
+ * resources — pipelines, tile pools — remain per view/layer pair). Custom
+ * layers that assumed a fresh instance per referencing view must migrate:
+ * instance state (selections, caches, load status) is now shared by all
+ * views of that layer ID.
+ */
 export abstract class BaseLayer {
   readonly id: string;
   constructor(id?: string) {
@@ -286,16 +297,21 @@ export abstract class BaseLayer {
    * Owner-injected render requester. Layers call `this.requestRender()` from
    * async sites (tile uploads, surface loads) to schedule a frame without
    * mutating shared state. Wired via `attach`; cleared via `detach`.
+   *
+   * ARCH-1: the channel is attached ONCE by the owning ViewerEngine, which
+   * fans each signal out to every referencing view (readiness waiters,
+   * render scheduling). Views never attach — a second `attach` would
+   * overwrite the engine's channel.
    */
   private _requestRender: () => void = () => {};
   protected requestRender(): void { this._requestRender(); }
 
-  /** Attach to a render-request channel. Called by the view on layer registration. */
+  /** Attach to the render-request channel. Called once by the owning ViewerEngine. */
   attach(ctx: { requestRender: () => void }): void {
     this._requestRender = ctx.requestRender;
   }
 
-  /** Detach the render-request channel. Called by the view on layer removal. */
+  /** Detach the render-request channel. Called by the engine on destroy. */
   detach(): void {
     this._requestRender = () => {};
   }
@@ -317,10 +333,13 @@ export abstract class BaseLayer {
 
   /**
    * Coarse load state (DX-M2) — see {@link LayerLoadStatus}. The default
-   * derives from `isReady`; layers with an optional source (tiled image
-   * layers) override to report `"idle"`.
+   * derives from the tracked load: a recorded failure reports `"error"`,
+   * otherwise `isReady` decides between `"ready"` and `"loading"`. Layers
+   * with an optional source (tiled image layers) override to also report
+   * `"idle"`.
    */
   get loadStatus(): LayerLoadStatus {
+    if (this._loadError !== undefined) return "error";
     return this.isReady ? "ready" : "loading";
   }
 
@@ -332,14 +351,85 @@ export abstract class BaseLayer {
    * failures.
    */
   get loadError(): Error | undefined {
-    return undefined;
+    return this._loadError;
+  }
+
+  // === Tracked async load (ARCH-1) ===
+
+  /**
+   * One state-layer identity owns one data runtime and one settled load
+   * (ARCH-1): the owning ViewerEngine starts the tracked load exactly once
+   * via {@link ensureLoaded} and every consumer shares its outcome through
+   * `loadStatus` / `loadError` and the render-request channel. Dynamic
+   * source replacement starts a new load generation via {@link restartLoad}.
+   */
+  private _loadPromise?   : Promise<void>;
+  private _loadError?     : Error;
+  private _loadGeneration = 0;
+
+  /**
+   * Start this layer's tracked async load, or return the one already in
+   * flight. Runs {@link initAsync} at most once per load generation; later
+   * calls share the same promise. A rejection is recorded as
+   * {@link loadError} (so `loadStatus` settles to `"error"` instead of
+   * hanging in `"loading"`), signaled through the render channel, and
+   * rethrown to the caller — callers must handle the rejection.
+   *
+   * Called by the owning ViewerEngine once the GPU device is ready.
+   */
+  ensureLoaded(): Promise<void> {
+    if (!this._loadPromise) this._loadPromise = this._trackLoad();
+    return this._loadPromise;
   }
 
   /**
-   * Async data initialization (e.g. fetch + parse a mesh). Called once by the
-   * view after the GPU device is ready. Default is a no-op; override in layers
-   * that need to load data before they can render. Resolves once the layer is
-   * ready; the view re-renders on resolution.
+   * Clear the settled load state and start a fresh tracked load (dynamic
+   * source replacement). The old error is cleared up front — `loadStatus`
+   * flips from `"error"` back to `"loading"` — and waiters of the new
+   * generation settle through the render channel when it completes.
+   */
+  protected restartLoad(): Promise<void> {
+    this._loadPromise = undefined;
+    this._loadError   = undefined;
+    return this.ensureLoaded();
+  }
+
+  /**
+   * Run one load generation of {@link initAsync}, recording its outcome.
+   * The generation guard keeps a superseded load (source replaced while in
+   * flight) from clobbering the newer generation's state.
+   */
+  private _trackLoad(): Promise<void> {
+    const generation = ++this._loadGeneration;
+    const current = () => this._loadGeneration === generation;
+    return Promise.resolve()
+      .then(() => this.initAsync())
+      .then(
+        () => {
+          // Settle signal — the engine fans it out to every referencing
+          // view: readiness waiters resolve, a frame is scheduled.
+          if (current()) this.requestRender();
+        },
+        (err: unknown) => {
+          const error = err instanceof Error ? err : new Error(String(err));
+          if (current()) {
+            this._loadError = error;
+            this.requestRender();
+          }
+          throw error;
+        },
+      );
+  }
+
+  /**
+   * Async data initialization (e.g. fetch + parse a mesh). Default is a
+   * no-op; override in layers that need to load data before they can render.
+   *
+   * ARCH-1: invoked through the layer's single tracked load
+   * ({@link ensureLoaded}) once the GPU device is ready — never concurrently,
+   * never more than once per load generation. Overriding implementations
+   * MUST let failures propagate (do not catch-and-log): the rejection is
+   * recorded as {@link loadError} so readiness observers settle.
    */
   initAsync(): Promise<void> { return Promise.resolve(); }
 

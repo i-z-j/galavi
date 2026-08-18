@@ -12,12 +12,22 @@ import {
   openDataset,
   registerDataset,
   type DatasetConfig,
-  type DatasetDefaults,
-} from "../src/index";
+} from "../src/advanced";
 import { datasetRegistry } from "../src/registry";
 import type { ImagePyramid, LayerConfig } from "../src/types";
 
 const KIND = "fake-dataset";
+
+/**
+ * Test kinds own an exact config in the map, like any format package (the
+ * augmentation is compilation-wide; the runtime registration happens per
+ * test below).
+ */
+declare module "galavi" {
+  interface DatasetConfigMap {
+    "fake-dataset": { type: "fake-dataset"; source: string };
+  }
+}
 
 const PYRAMID_3D: ImagePyramid = {
   levels: [
@@ -56,10 +66,6 @@ class StubDataset extends Dataset {
     this.disposed = true;
   }
 
-  override deriveDefaults(): DatasetDefaults {
-    return { mode: "volume", selection: { ...this.defaultSelection } };
-  }
-
   override createDefaultLayers(): LayerConfig[] {
     return [];
   }
@@ -82,7 +88,8 @@ describe("openDataset", () => {
     expect(dataset.type).toBe(KIND);
     expect((dataset as StubDataset).loaded).toBe(true);
     expect(dataset.channels).toHaveLength(2);
-    expect(dataset.capabilities.supports3D).toBe(true);
+    expect(dataset.capabilities.modes).toContain("volume");
+    expect(dataset.capabilities.defaultMode).toBe("volume");
   });
 
   test("every call constructs a fresh dataset (no caching; disposal is the caller's job)", async () => {
@@ -97,15 +104,21 @@ describe("openDataset", () => {
 
   test("rejects with an actionable error for an unknown kind", async () => {
     registerDataset(KIND, (config) => new StubDataset(config));
-    await expect(openDataset({ type: "nope", source: "mem://x" })).rejects.toThrow(
+    await expect(
+      // @ts-expect-error — "nope" is not a registered loader key
+      openDataset({ type: "nope", source: "mem://x" }),
+    ).rejects.toThrow(
       /Unknown dataset kind: "nope" \(registered: [^)]*fake-dataset[^)]*\)\. Register a dataset kind first via registerDataset\(\)\./,
     );
   });
 
-  test('the "image" kind error hints at the out-of-core adapter import', async () => {
+  test('the "ome-zarr" kind error hints at the subpath import that provides it', async () => {
     registerDataset(KIND, (config) => new StubDataset(config));
-    await expect(openDataset({ type: "image", source: "mem://x" })).rejects.toThrow(
-      /Unknown dataset kind: "image".*Did you mean to import "galavi\/ome-zarr"\?/,
+    // This file never imports ../src/dataset/ome-zarr, so the kind is
+    // unregistered in this module graph (the config type compiles because the
+    // augmentation is compilation-wide).
+    await expect(openDataset({ type: "ome-zarr", source: "mem://x" })).rejects.toThrow(
+      /Unknown dataset kind: "ome-zarr".*Did you mean to import "galavi\/ome-zarr"\?/,
     );
   });
 
@@ -128,32 +141,31 @@ describe("openDataset", () => {
 });
 
 describe("getDatasetCapabilities", () => {
-  test("2D pyramid: no 3D, no volume preview", () => {
+  test("2D pyramid: slice-only", () => {
     expect(getDatasetCapabilities(PYRAMID_2D)).toEqual({
-      zDepth: 1,
-      supports3D: false,
-      supportsVolumePreview: false,
+      modes: ["slice"],
+      defaultMode: "slice",
     });
   });
 
-  test("well-behaved 3D pyramid: volume preview without the budget policy", () => {
+  test("well-behaved 3D pyramid: volume default without the budget policy", () => {
     expect(getDatasetCapabilities(PYRAMID_3D)).toEqual({
-      zDepth: 4,
-      supports3D: true,
-      supportsVolumePreview: true,
+      modes: ["slice", "volume", "quad"],
+      defaultMode: "volume",
     });
   });
 
   test("z-chunk=1 pathological pyramid: bounded volume preview via the policy", () => {
-    const caps = getDatasetCapabilities(PYRAMID_STRIDED);
-    expect(caps).toEqual({ zDepth: 500, supports3D: true, supportsVolumePreview: true });
+    expect(getDatasetCapabilities(PYRAMID_STRIDED)).toEqual({
+      modes: ["slice", "volume", "quad"],
+      defaultMode: "volume",
+    });
   });
 
-  test("empty pyramid: no capabilities", () => {
+  test("empty pyramid: slice-only", () => {
     expect(getDatasetCapabilities({ levels: [] })).toEqual({
-      zDepth: 0,
-      supports3D: false,
-      supportsVolumePreview: false,
+      modes: ["slice"],
+      defaultMode: "slice",
     });
   });
 });

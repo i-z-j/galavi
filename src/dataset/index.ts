@@ -1,10 +1,10 @@
 /**
  * Dataset module — the single dataset/source extension point.
  *
- * Dataset kinds (e.g. `"mesh"`, `"image"`) register a factory via
+ * Dataset kinds (e.g. `"mesh"`, `"ome-zarr"`) register a factory via
  * `registerDataset` (registry.ts); `openDataset` constructs and loads a fresh
  * {@link Dataset} per call — there is no caching, disposal is the caller's
- * job.
+ * job. Each kind owns its exact config in {@link DatasetConfigMap}.
  */
 
 import { datasetRegistry } from "../registry";
@@ -15,21 +15,22 @@ export type {
   DatasetCapabilities,
   DatasetChannel,
   DatasetConfig,
-  DatasetDefaults,
+  DatasetConfigMap,
   DatasetDimension,
   DefaultLayersOptions,
 } from "./base";
 
-// Core dataset kinds — the eager import chain that self-registers them.
-// Never import `./ome-zarr` here (it lives outside the core package).
+// The built-in mesh kind (its registration is a lazy datasetRegistry
+// built-in — registry.ts; never import `./ome-zarr` here, it is the
+// `galavi/ome-zarr` subpath entry).
 export { MeshDataset } from "./mesh";
 
 /**
- * Kinds that live outside the core package: the unknown-kind error names the
+ * Kinds that live outside the core entry: the unknown-kind error names the
  * import that provides them.
  */
 const KIND_IMPORT_HINTS: Record<string, string> = {
-  image: "galavi/ome-zarr",
+  "ome-zarr": "galavi/ome-zarr",
 };
 
 /**

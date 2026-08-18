@@ -254,9 +254,11 @@ export abstract class TiledImageLayer extends BaseLayer {
   /**
    * Load state (DX-M2): `"idle"` when no source is set, `"ready"` otherwise.
    * Sources are explicit configs — a `Data` without `pyramid`/`fetch` no
-   * longer triggers any async resolution.
+   * longer triggers any async resolution. A failed tracked load (ARCH-1)
+   * still reports `"error"` via the base record.
    */
   override get loadStatus(): LayerLoadStatus {
+    if (this.loadError !== undefined) return "error";
     return this.source ? "ready" : "idle";
   }
 

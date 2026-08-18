@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { FUI_THEME, RoiSelectorOverlay, type State } from '../src/index'
+import { FUI_THEME, RoiSelectorOverlay, type State } from '../src/advanced'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 const state: State = {

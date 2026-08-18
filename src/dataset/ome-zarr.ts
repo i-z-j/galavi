@@ -1,7 +1,7 @@
 /**
- * OME-Zarr image dataset kind — `"image"`, exposed via the `galavi/ome-zarr`
- * subpath (zarrita is an optional peer dependency; the core package never
- * imports this module).
+ * OME-Zarr image dataset kind — `"ome-zarr"`, exposed via the `galavi/ome-zarr`
+ * subpath (zarrita is a regular runtime dependency of galavi, kept external
+ * from the bundles; the core entry never imports this module).
  *
  * Opens an OME-Zarr store via zarrita, reads multiscales metadata, and
  * provides a galavi-compatible tile fetch that converts zarr chunks to
@@ -27,7 +27,8 @@
  *   - visibility       — omero `active` flags when present, otherwise the
  *                        first channel only
  *   - capabilities     — `getDatasetCapabilities` (DX-M4 policy semantics:
- *                        a z-chunk=1 store reports a bounded volume preview)
+ *                        a z-chunk=1 store still advertises a bounded volume
+ *                        preview)
  */
 
 import * as zarr from "zarrita";
@@ -47,9 +48,27 @@ import {
   getDatasetCapabilities,
   type DatasetChannel,
   type DatasetConfig,
-  type DatasetDefaults,
   type DefaultLayersOptions,
 } from "./base";
+
+/**
+ * Register the `"ome-zarr"` loader identity: importing `galavi/ome-zarr`
+ * extends {@link DatasetConfigMap} (and therefore `DatasetConfig` and the
+ * typed `registerDataset`) with this format's exact config. The augmentation
+ * targets `./base` — the single `DatasetConfigMap` declaration the public
+ * `"galavi"` entry re-exports — so it survives declaration emission verbatim
+ * (`dist/dataset/ome-zarr.d.ts` keeps the same relative specifier) and merges
+ * with the exact interface every published `DatasetConfig` reference resolves
+ * to. (External format packages still augment the public `declare module
+ * "galavi"` name, which resolves to the same interface through the root
+ * re-export.)
+ */
+declare module "./base" {
+  interface DatasetConfigMap {
+    /** OME-Zarr multiscale image loader (the `galavi/ome-zarr` subpath). */
+    "ome-zarr": { type: "ome-zarr"; source: string };
+  }
+}
 
 // ============================================================================
 // STORE — zarr store construction with optional fetch injection
@@ -911,7 +930,7 @@ function isZarrGetResult(value: unknown): value is ZarrGetResult {
 // data — and returns a fully typed result: rows, columns, wells (with
 // row/column identity and path), and each well's images/fields with a
 // `DatasetConfig`-compatible reference per field, so consumers can open a
-// field directly through `openDataset({ type: "image", source })` (the
+// field directly through `openDataset({ type: "ome-zarr", source })` (the
 // `<plateUrl>/<wellPath>/<fieldPath>` URL convention, e.g.
 // `.../9846151.zarr/0`).
 //
@@ -1138,7 +1157,7 @@ export async function openOMEZarrPlate(url: string, options?: OMEZarrOptions): P
       index,
       path       : image.path,
       acquisition: image.acquisition,
-      source     : { type: "image", source: `${baseUrl}/${wellRef.path}/${image.path}` },
+      source     : { type: "ome-zarr", source: `${baseUrl}/${wellRef.path}/${image.path}` },
     }));
 
     return {
@@ -1163,11 +1182,11 @@ export async function openOMEZarrPlate(url: string, options?: OMEZarrOptions): P
 }
 
 // ============================================================================
-// IMAGE DATASET — the "image" dataset kind
+// IMAGE DATASET — the "ome-zarr" dataset kind
 // ============================================================================
 
 /**
- * ImageDataset — the `"image"` dataset kind: a single OME-Zarr multiscale
+ * ImageDataset — the `"ome-zarr"` dataset kind: a single OME-Zarr multiscale
  * image opened from a URL. `load()` normalizes the OME/OMERO metadata onto
  * the base Dataset fields; `pyramid`/`fetch`/`dtype` plug directly into
  * layer `data` configs. Self-registers on module load.
@@ -1183,26 +1202,51 @@ export class ImageDataset extends Dataset {
   declare physical: PhysicalSpace;
 
   /**
+   * Store-open options threaded through to `openOMEZarr` during `load()` —
+   * runtime-only (never part of the JSON `config`), so
+   * {@link openOMEZarrDataset} can open authenticated/custom stores.
+   */
+  private readonly _options?: OMEZarrOptions;
+  private _info?: OMEZarrInfo;
+
+  constructor(config: DatasetConfig, options?: OMEZarrOptions) {
+    super(config);
+    this._options = options;
+  }
+
+  /**
+   * The parsed OME-Zarr metadata obtained during `load()`, retained verbatim
+   * (API-5): format-specific details — pyramid diagnostics, omero channel
+   * metadata, dtype, OME version — stay available without reopening the
+   * store. Read-only; undefined until `load()` resolves, released by
+   * `dispose()`.
+   */
+  get info(): OMEZarrInfo | undefined {
+    return this._info;
+  }
+
+  /**
    * Open the store and populate the normalized metadata fields. A missing
    * `source` is named directly; store open failures keep the underlying
    * message (unsupported metadata vs network/CORS) and add the URL, with the
    * original error preserved as `cause` — never swallowed.
    */
   override async load(): Promise<void> {
-    const url = this.config.source;
+    const url: unknown = this.config.source;
     if (typeof url !== "string") {
       throw new Error(
-        `image dataset config requires a "source" URL string, got: ${JSON.stringify(this.config)}`,
+        `ome-zarr dataset config requires a "source" URL string, got: ${JSON.stringify(this.config)}`,
       );
     }
     let info: OMEZarrInfo;
     try {
-      info = await openOMEZarr(url);
+      info = await openOMEZarr(url, this._options);
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
       throw new Error(`Failed to open OME-Zarr dataset at ${url}: ${message}`, { cause });
     }
 
+    this._info   = info;
     this.pyramid = info.pyramid;
     this.fetch   = info.fetchTile;
     this.dtype   = info.dtype;
@@ -1236,17 +1280,10 @@ export class ImageDataset extends Dataset {
 
   /** Release references held for the layer configs (no stateful resources). */
   override dispose(): void {
+    this._info   = undefined;
     this.pyramid = { levels: [] };
     this.fetch   = async () => new ArrayBuffer(0);
     this.dtype   = "";
-  }
-
-  override deriveDefaults(): DatasetDefaults {
-    const caps = this.capabilities;
-    return {
-      mode      : caps.zDepth > 1 && caps.supports3D && caps.supportsVolumePreview ? "volume" : "slice",
-      selection : { ...this.defaultSelection },
-    };
   }
 
   override createDefaultLayers(options: DefaultLayersOptions): LayerConfig[] {
@@ -1276,4 +1313,23 @@ export class ImageDataset extends Dataset {
   }
 }
 
-registerDataset("image", (config) => new ImageDataset(config));
+/**
+ * Open an OME-Zarr store AS a loaded {@link ImageDataset} in one call
+ * (API-5): the store's metadata is fetched once and retained on
+ * `dataset.info`, so applications that need format metadata before scene
+ * construction never pay a second open.
+ *
+ * The returned instance is CALLER-OWNED — dispose it yourself, or hand it to
+ * `viewer.open(dataset)`, which adopts it (ownership transfers at invocation;
+ * after that only the Viewer disposes it).
+ */
+export async function openOMEZarrDataset(
+  url: string,
+  options?: OMEZarrOptions,
+): Promise<ImageDataset> {
+  const dataset = new ImageDataset({ type: "ome-zarr", source: url }, options);
+  await dataset.load();
+  return dataset;
+}
+
+registerDataset("ome-zarr", (config) => new ImageDataset(config));

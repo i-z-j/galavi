@@ -4,7 +4,7 @@
  * (uint8 LUT vs scale/offset).
  */
 import { describe, expect, it } from "vitest";
-import { dtypeNormalization, floatToFloat16, makeFloat16Encoder } from "../src/index";
+import { dtypeNormalization, floatToFloat16, makeFloat16Encoder } from "../src/advanced";
 import { packPlaneToFloat16, toFloat16 } from "../src/dataset/ome-zarr";
 
 describe("dtypeNormalization", () => {

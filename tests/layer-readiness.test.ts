@@ -11,7 +11,7 @@ import {
   createViewerEngine,
   registerLayer,
   type ViewerEngine,
-} from "../src/index";
+} from "../src/advanced";
 import { BaseLayer } from "../src/layer";
 import { layerRegistry } from "../src/registry";
 import type { Geometry, LayerParams } from "../src/layer";

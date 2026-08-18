@@ -7,7 +7,7 @@
  * update that never touches geometryVersion (no pipeline rebuild).
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { createViewerEngine, type ViewerEngine } from "../src/index";
+import { createViewerEngine, type ViewerEngine } from "../src/advanced";
 import {
   VolumeLayer,
   VolumeLayerParams,

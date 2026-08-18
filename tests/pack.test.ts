@@ -5,7 +5,7 @@
  * live in galavi as shared tile-source machinery.
  */
 import { describe, expect, it } from "vitest";
-import { dtypeNormalization, floatToFloat16, makeFloat16Encoder } from "../src/index";
+import { dtypeNormalization, floatToFloat16, makeFloat16Encoder } from "../src/advanced";
 
 describe("dtypeNormalization", () => {
   it("maps integer dtype ranges onto [0, 1]", () => {

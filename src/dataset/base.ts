@@ -7,7 +7,7 @@
  *
  * A Dataset owns source IO and the derived metadata (channels, dimensions,
  * physical space, capabilities) and knows how to translate itself into the
- * viewer's default mode and layer configs. Runtime resources (fetches, parsed
+ * viewer's default layer configs. Runtime resources (fetches, parsed
  * geometry) live on the instance and are released via {@link Dataset.dispose};
  * the {@link DatasetConfig} it was created from stays pure JSON.
  */
@@ -22,18 +22,35 @@ import type {
 import { planVolumePreview } from "../utils/tile/volume-policy";
 
 /**
- * Declarative dataset configuration. `type` is the public discriminator
- * resolving through `datasetRegistry` (`registerDataset`). Must survive
+ * Loader identity map: each dataset kind owns its exact declarative config
+ * here, keyed by its `type` discriminator. Format packages augment this map
+ * via module augmentation (see `galavi/ome-zarr`):
+ *
+ * ```ts
+ * declare module "galavi" {
+ *   interface DatasetConfigMap {
+ *     "ome-zarr": { type: "ome-zarr"; source: string };
+ *   }
+ * }
+ * ```
+ *
+ * Augmenting the map extends {@link DatasetConfig} and types
+ * `registerDataset` for the new kind — an unknown `type` key or a missing
+ * required field is a compile error, not a runtime surprise.
+ */
+export interface DatasetConfigMap {
+  /** Built-in OBJ mesh loader (always registered through the core entry). */
+  mesh: { type: "mesh"; source: string };
+}
+
+/**
+ * Declarative dataset configuration — the union of every registered loader's
+ * config. `type` is the public loader identity resolving through
+ * `datasetRegistry` (`registerDataset`). Must survive
  * `JSON.parse(JSON.stringify(...))` unchanged — runtime resources never
  * appear here.
  */
-export interface DatasetConfig {
-  /** Dataset kind key, resolved via `datasetRegistry`. */
-  type    : string;
-  /** Optional source URL or path. */
-  source? : string;
-  [key: string]: unknown;
-}
+export type DatasetConfig = DatasetConfigMap[keyof DatasetConfigMap];
 
 /**
  * One normalized channel: render-ready color (`#RRGGBB`), contrast window in
@@ -61,49 +78,37 @@ export interface DatasetDimension {
 }
 
 /**
- * What the dataset can drive, derived from pyramid/chunk metadata alone.
- * Lets `mode: "auto"` ask "can volume produce a valid bounded preview"
- * without opening a renderer.
+ * The presentation contract: which viewer modes this dataset can actually
+ * build layers for, and which one `mode: "auto"` resolves to. Format-neutral
+ * by design — a dataset advertises real presentations, never image-pyramid
+ * facts (pyramid diagnostics like z-depth stay on the format-specific
+ * subclass, e.g. `ImageDataset.pyramid`).
  */
 export interface DatasetCapabilities {
-  /** Z depth of the finest pyramid level (1 for 2D sources). */
-  zDepth                : number;
-  /** z > 1 — 3D modes (volume/quad) are meaningful. */
-  supports3D            : boolean;
-  /**
-   * Volume mode can produce a valid bounded preview: the pyramid is
-   * well-behaved (renders directly) or the automatic tile-budget policy
-   * (`planVolumePreview`, DX-M4) derives a bounded plan for it.
-   */
-  supportsVolumePreview : boolean;
+  /** Modes the dataset can drive; intersected with target layout support by the Viewer. */
+  modes       : readonly ("slice" | "volume" | "quad")[];
+  /** What viewer `mode: "auto"` resolves to — always a member of `modes`. */
+  defaultMode : "slice" | "volume" | "quad";
 }
 
 /**
- * Derive dataset capabilities from pyramid/chunk metadata, reusing the
+ * Derive image-dataset capabilities from pyramid/chunk metadata, reusing the
  * DX-M4 tile-budget policy semantics: `planVolumePreview` returns `null` for
  * well-behaved pyramids (they render directly — a valid preview) and a
- * bounded plan for pathological ones, so every non-empty 3D pyramid reports
- * volume-preview support.
+ * bounded plan for pathological ones, so every non-empty 3D pyramid
+ * advertises volume. 2D pyramids (z ≤ 1) are slice-only.
  */
 export function getDatasetCapabilities(pyramid: ImagePyramid): DatasetCapabilities {
   const zDepth = pyramid.levels[0]?.shape[2] ?? 0;
-  const supports3D = zDepth > 1;
-  if (!supports3D) {
-    return { zDepth, supports3D, supportsVolumePreview: false };
+  if (zDepth <= 1) {
+    return { modes: ["slice"], defaultMode: "slice" };
   }
   const plan = planVolumePreview(pyramid);
   // null → well-behaved, volume renders the pyramid directly; plan → bounded.
-  return {
-    zDepth,
-    supports3D,
-    supportsVolumePreview: plan === null || plan.maxTiles > 0,
-  };
-}
-
-/** What viewer mode `"auto"` resolves to, plus the default dimension selection. */
-export interface DatasetDefaults {
-  mode      : "slice" | "volume" | "quad";
-  selection : Record<string, number>;
+  if (plan === null || plan.maxTiles > 0) {
+    return { modes: ["slice", "volume", "quad"], defaultMode: "volume" };
+  }
+  return { modes: ["slice"], defaultMode: "slice" };
 }
 
 /**
@@ -148,9 +153,11 @@ export abstract class Dataset {
   dimensions       : DatasetDimension[] = [];
   /** Default index per non-spatial dimension. */
   defaultSelection : Record<string, number> = {};
-  capabilities     : DatasetCapabilities = {
-    zDepth: 0, supports3D: false, supportsVolumePreview: false,
-  };
+  /**
+   * The modes this dataset can build (`modes`) and what `mode: "auto"`
+   * resolves to (`defaultMode`). Subclasses populate this during `load()`.
+   */
+  capabilities     : DatasetCapabilities = { modes: ["slice"], defaultMode: "slice" };
 
   constructor(config: DatasetConfig) {
     this.type = config.type;
@@ -162,9 +169,6 @@ export abstract class Dataset {
 
   /** Release runtime resources held by this dataset. */
   abstract dispose(): void;
-
-  /** What `"auto"` resolves to for this dataset. */
-  abstract deriveDefaults(): DatasetDefaults;
 
   /** Build the default layer configs for one of the facade's views. */
   abstract createDefaultLayers(options: DefaultLayersOptions): LayerConfig[];

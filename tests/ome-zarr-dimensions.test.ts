@@ -6,7 +6,7 @@
  * axes are reported faithfully.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { floatToFloat16 } from "../src/index";
+import { floatToFloat16 } from "../src/advanced";
 import { fetch2DPlane, openOMEZarr } from "../src/dataset/ome-zarr";
 
 const encoder = new TextEncoder();

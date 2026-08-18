@@ -115,11 +115,11 @@ describe("openOMEZarrPlate", () => {
     it("builds DatasetConfig-compatible child references per field", async () => {
       const plate = await openOMEZarrPlate(V5_BASE);
       expect(plate.wells[0].fields.map((f) => f.source)).toEqual([
-        { type: "image", source: `${V5_BASE}/A/1/0` },
-        { type: "image", source: `${V5_BASE}/A/1/1` },
+        { type: "ome-zarr", source: `${V5_BASE}/A/1/0` },
+        { type: "ome-zarr", source: `${V5_BASE}/A/1/1` },
       ]);
       expect(plate.wells[1].fields[0].source)
-        .toEqual({ type: "image", source: `${V5_BASE}/B/2/0` });
+        .toEqual({ type: "ome-zarr", source: `${V5_BASE}/B/2/0` });
       // Descriptors must survive JSON round-trip (galavi DatasetConfig contract).
       expect(JSON.parse(JSON.stringify(plate.wells[0].fields[0].source)))
         .toEqual(plate.wells[0].fields[0].source);
@@ -137,7 +137,7 @@ describe("openOMEZarrPlate", () => {
       expect(plate.wells[0]).toMatchObject({ path: "A/1", row: "A", column: "1" });
       expect(plate.wells[0].fields).toHaveLength(3);
       expect(plate.wells[0].fields[2].source)
-        .toEqual({ type: "image", source: `${V4_BASE}/A/1/2` });
+        .toEqual({ type: "ome-zarr", source: `${V4_BASE}/A/1/2` });
     });
   });
 

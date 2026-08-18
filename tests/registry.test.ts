@@ -6,7 +6,7 @@ import { afterEach, describe, expect, test } from "vitest";
 import { PointsLayer } from "../src/layer";
 import {
   Dataset,
-  type DatasetDefaults,
+  type DatasetConfig,
 } from "../src/dataset";
 import {
   datasetRegistry,
@@ -15,6 +15,13 @@ import {
   registerLayer,
 } from "../src/registry";
 import type { LayerConfig } from "../src/types";
+
+/** Test kinds own an exact config in the map, like any format package. */
+declare module "galavi" {
+  interface DatasetConfigMap {
+    "custom-dataset": { type: "custom-dataset"; source: string };
+  }
+}
 
 describe("layerRegistry", () => {
   afterEach(() => {
@@ -44,14 +51,16 @@ describe("layerRegistry", () => {
     expect(layerRegistry.unregister("custom-points")).toBe(true);
     expect(layerRegistry.has("custom-points")).toBe(false);
   });
+
+  test("non-dataset registries keep override semantics (duplicates replace)", () => {
+    registerLayer("custom-points", (id) => new PointsLayer(id));
+    expect(() => registerLayer("custom-points", (id) => new PointsLayer(id))).not.toThrow();
+  });
 });
 
 class StubDataset extends Dataset {
   override async load(): Promise<void> {}
   override dispose(): void {}
-  override deriveDefaults(): DatasetDefaults {
-    return { mode: "slice", selection: {} };
-  }
   override createDefaultLayers(): LayerConfig[] {
     return [];
   }
@@ -81,7 +90,20 @@ describe("datasetRegistry", () => {
   });
 
   test("throws `Unknown type` for an unregistered kind", () => {
-    expect(() => datasetRegistry.create("nope", { type: "nope" }))
+    expect(() => datasetRegistry.create("nope", { type: "nope" } as unknown as DatasetConfig))
       .toThrow('Unknown type: "nope"');
+  });
+
+  test("a duplicate kind registration throws, naming the conflicting key", () => {
+    registerDataset("custom-dataset", (config) => new StubDataset(config));
+    expect(() => registerDataset("custom-dataset", (config) => new StubDataset(config)))
+      .toThrow(/Duplicate dataset kind registration: "custom-dataset" is already registered/);
+    // The rejected duplicate did not replace or remove the original.
+    expect(datasetRegistry.has("custom-dataset")).toBe(true);
+  });
+
+  test("built-in kinds reject re-registration as well", () => {
+    expect(() => registerDataset("mesh", (config) => new StubDataset(config)))
+      .toThrow(/Duplicate dataset kind registration: "mesh"/);
   });
 });

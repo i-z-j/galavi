@@ -7,7 +7,7 @@ import {
   type ImagePyramid,
   type LayerConfig,
   type State,
-} from "../src/index";
+} from "../src/advanced";
 import { overlayRegistry } from "../src/registry";
 
 const pyramid: ImagePyramid = {

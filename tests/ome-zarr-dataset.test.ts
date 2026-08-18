@@ -1,17 +1,18 @@
 /**
- * ImageDataset ("image" kind) tests.
+ * ImageDataset ("ome-zarr" kind) tests.
  *
- * `src/dataset/ome-zarr.ts` self-registers the "image" dataset kind on module
- * load, so `openDataset({ type: "image", source })` resolves a normalized
- * ImageDataset: channels (colors/labels/contrast/active), physical space,
- * default selection, and 2D/3D + bounded-preview capabilities. Runs against
- * deterministic in-memory stores served through a stubbed global fetch
- * (no network). Also covers `deriveDefaults` and the per-channel
- * `createDefaultLayers` translation the Viewer facade drives.
+ * `src/dataset/ome-zarr.ts` self-registers the "ome-zarr" dataset kind on
+ * module load, so `openDataset({ type: "ome-zarr", source })` resolves a
+ * normalized ImageDataset: channels (colors/labels/contrast/active), physical
+ * space, default selection, and mode capabilities (2D slice-only, 3D volume
+ * default via the bounded-preview policy). Runs against deterministic
+ * in-memory stores served through a stubbed global fetch (no network). Also
+ * covers the per-channel `createDefaultLayers` translation the Viewer facade
+ * drives.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { openDataset } from "../src/index";
-import { ImageDataset } from "../src/dataset/ome-zarr";
+import { ImageDataset, openOMEZarr, openOMEZarrDataset } from "../src/dataset/ome-zarr";
 
 const MULTI_URL = "https://example.test/multichannel.ome.zarr";
 const PLANE_URL = "https://example.test/plane.ome.zarr";
@@ -209,12 +210,12 @@ function stubFetch() {
 }
 
 async function openImage(url: string): Promise<ImageDataset> {
-  const dataset = await openDataset({ type: "image", source: url });
+  const dataset = await openDataset({ type: "ome-zarr", source: url });
   expect(dataset).toBeInstanceOf(ImageDataset);
   return dataset as ImageDataset;
 }
 
-describe("image dataset kind", () => {
+describe("ome-zarr dataset kind", () => {
   beforeEach(() => {
     stubFetch();
   });
@@ -227,8 +228,8 @@ describe("image dataset kind", () => {
   it("resolves a 3D multichannel store into a normalized dataset", async () => {
     const dataset = await openImage(MULTI_URL);
 
-    expect(dataset.type).toBe("image");
-    expect(dataset.config).toEqual({ type: "image", source: MULTI_URL });
+    expect(dataset.type).toBe("ome-zarr");
+    expect(dataset.config).toEqual({ type: "ome-zarr", source: MULTI_URL });
     expect(dataset.name).toBe("test-multichannel");
     expect(dataset.dtype).toBe("uint8");
 
@@ -253,11 +254,10 @@ describe("image dataset kind", () => {
       { index: 1, label: "GFP", color: "#00FF00", contrast: [0, 1], visible: false },
     ]);
 
-    // Well-behaved 3D pyramid: volume preview without the budget policy.
+    // Well-behaved 3D pyramid: all three modes, volume default.
     expect(dataset.capabilities).toEqual({
-      zDepth: 4,
-      supports3D: true,
-      supportsVolumePreview: true,
+      modes: ["slice", "volume", "quad"],
+      defaultMode: "volume",
     });
   });
 
@@ -271,9 +271,8 @@ describe("image dataset kind", () => {
       { index: 0, label: "Channel 0", color: "#00B0FF", contrast: [0, 1], visible: true },
     ]);
     expect(dataset.capabilities).toEqual({
-      zDepth: 1,
-      supports3D: false,
-      supportsVolumePreview: false,
+      modes: ["slice"],
+      defaultMode: "slice",
     });
   });
 
@@ -286,17 +285,16 @@ describe("image dataset kind", () => {
     ]);
   });
 
-  it("z-chunk=1 dataset reports bounded volume preview capability (DX-M4 policy)", async () => {
+  it("z-chunk=1 dataset still advertises volume (bounded preview, DX-M4 policy)", async () => {
     const dataset = await openImage(STRIDED_URL);
     expect(dataset.capabilities).toEqual({
-      zDepth: 500,
-      supports3D: true,
-      supportsVolumePreview: true,
+      modes: ["slice", "volume", "quad"],
+      defaultMode: "volume",
     });
   });
 
   it("rejects with an actionable error for unsupported metadata", async () => {
-    const promise = openDataset({ type: "image", source: EMPTY_URL });
+    const promise = openDataset({ type: "ome-zarr", source: EMPTY_URL });
     await expect(promise).rejects.toThrow(
       /Failed to open OME-Zarr dataset at https:\/\/example\.test\/empty\.ome\.zarr: No OME-Zarr multiscales metadata found/,
     );
@@ -304,20 +302,54 @@ describe("image dataset kind", () => {
   });
 
   it("rejects when the config lacks a source", async () => {
-    await expect(openDataset({ type: "image" })).rejects.toThrow(
+    // @ts-expect-error — `source` is required by the typed config
+    await expect(openDataset({ type: "ome-zarr" })).rejects.toThrow(
       /requires a "source" URL string/,
     );
   });
 
-  describe("deriveDefaults", () => {
-    it("3D + volume-preview support resolves to volume mode", async () => {
+  describe("capabilities.defaultMode", () => {
+    it("3D + bounded-preview support defaults to volume mode", async () => {
       const dataset = await openImage(MULTI_URL);
-      expect(dataset.deriveDefaults()).toEqual({ mode: "volume", selection: { c: 0 } });
+      expect(dataset.capabilities.defaultMode).toBe("volume");
     });
 
-    it("2D resolves to slice mode", async () => {
+    it("2D defaults to slice mode", async () => {
       const dataset = await openImage(PLANE_URL);
-      expect(dataset.deriveDefaults()).toEqual({ mode: "slice", selection: {} });
+      expect(dataset.capabilities.defaultMode).toBe("slice");
+    });
+  });
+
+  describe("ImageDataset.info (API-5)", () => {
+    it("retains the parsed OMEZarrInfo — identical content to a fresh openOMEZarr", async () => {
+      const dataset = await openImage(MULTI_URL);
+      const info = dataset.info;
+      expect(info).toBeDefined();
+      // The very object load() obtained: the normalized fields alias into it.
+      expect(info!.pyramid).toBe(dataset.pyramid);
+      expect(info!.fetchTile).toBe(dataset.fetch);
+      expect(info!.omeVersion).toBe("0.5");
+      expect(info!.dtype).toBe("uint8");
+
+      // Content parity with a fresh open of the same store (fetchTile is a
+      // per-open closure — excluded from the comparison).
+      const fresh = await openOMEZarr(MULTI_URL);
+      const { fetchTile: _retained, ...rest } = info!;
+      const { fetchTile: _fresh, ...expected } = fresh;
+      expect(rest).toEqual(expected);
+    });
+
+    it("openOMEZarrDataset opens the store and loads the Dataset in one call", async () => {
+      const dataset = await openOMEZarrDataset(MULTI_URL);
+      expect(dataset).toBeInstanceOf(ImageDataset);
+      expect(dataset.config).toEqual({ type: "ome-zarr", source: MULTI_URL });
+      expect(dataset.info).toBeDefined();
+      expect(dataset.info!.omeroChannelLabels).toEqual(["DAPI", "GFP"]);
+      expect(dataset.channels).toHaveLength(2);
+      expect(dataset.capabilities.defaultMode).toBe("volume");
+
+      dataset.dispose();
+      expect(dataset.info).toBeUndefined(); // released with the other references
     });
   });
 

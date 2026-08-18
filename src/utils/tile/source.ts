@@ -58,7 +58,8 @@ export function sourceChanged(
     next?.url !== prev?.url ||
     next?.urlTemplate !== prev?.urlTemplate ||
     next?.fetch !== prev?.fetch ||
-    next?.pyramid !== prev?.pyramid
+    next?.pyramid !== prev?.pyramid ||
+    next?.geometry !== prev?.geometry
   );
 }
 

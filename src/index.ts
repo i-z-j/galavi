@@ -1,66 +1,19 @@
 /**
  * Galavi - Scientific data visualization library based on WebGPU.
+ *
+ * This is the COMMON entry (API-6): the high-level Viewer facade, dataset
+ * opening/registration, common vector/physical types, the app-facing theme
+ * helpers, and the Viewer event payload types. The low-level authoring
+ * surface — `ViewerEngine`, registries, base + built-in layer/view/control/
+ * overlay classes, typed layer options (incl. callback-bearing overlay
+ * options), camera/projection/tile/plugin utilities — lives in
+ * `galavi/advanced`; the OME-Zarr loader in `galavi/ome-zarr`.
  */
-
-// === Core API ===
-// Low-level composition: the engine + its config (advanced path; the Viewer
-// facade below covers the common scientific viewer).
-export {
-  ViewerEngine,
-  createViewerEngine,
-} from "./viewer";
-
-// === Types ===
-export type {
-  ID,
-  Vec2,
-  Vec3,
-  PhysicalUnit,
-  ViewerEngineConfig,
-  State,
-  ViewConfig,
-  ControlOptions,
-  OverlayOptions,
-  PhysicalSpace,
-  LayerConfig,
-  Exploration,
-  SpatialConfig,
-  TemporalConfig,
-  ChannelConfig,
-  Data,
-  ImagePyramid,
-  ImagePyramidLevel,
-  ViewResolution,
-  Render,
-  VolumeRenderMode,
-  Camera,
-  Temporal,
-  Action,
-} from "./types";
-
-export type {
-  OrbitControlOptions,
-  FlyControlOptions,
-  PanZoomControlOptions,
-} from "./control";
-
-// === Building Blocks Extension API ===
-export {
-  registerControl,
-  registerOverlay,
-  registerLayer,
-  registerView,
-  registerDataset,
-} from "./registry";
-export type {
-  DatasetFactory,
-} from "./registry";
 
 // === High-level Viewer facade (DX-L1/L2/M3/M6) ===
 // The common scientific viewer: one dataset session, modes, channels, camera,
 // controls/tools, and status — translated onto the low-level scene model
-// (engineering-cleanup-plan.md §15). `createViewerEngine` remains the advanced
-// path; `viewer.engine` is the escape hatch.
+// (engineering-cleanup-plan.md §15). `viewer.engine` is the escape hatch.
 export {
   Viewer,
   ViewerSupersededError,
@@ -78,11 +31,16 @@ export type {
   ViewerControlName,
   ViewerControlOptionsMap,
   ViewerControlsConfig,
+  ViewerEventMap,
+  ViewerEventName,
   ViewerMagnifierOptions,
   ViewerMode,
   ViewerModeOverride,
   ViewerModeOverrides,
   ViewerProjection,
+  ViewerRoiActiveChangeEvent,
+  ViewerRoiChangeEvent,
+  ViewerRoiOptions,
   ViewerStatus,
   ViewerToolAccessor,
   ViewerToolName,
@@ -91,93 +49,53 @@ export type {
   ViewerViewAccessor,
 } from "./viewer";
 
-// === Dataset building block ===
+// === Dataset opening + registration ===
 // One dataset/session abstraction: kinds register via registerDataset (the
 // single dataset/source extension point); openDataset constructs and loads a
-// fresh Dataset per call. Image kinds (e.g. "image" / OME-Zarr) live outside
-// the core package.
+// fresh Dataset per call. Format loaders (e.g. "ome-zarr") live in subpaths
+// (galavi/ome-zarr) and augment DatasetConfigMap with their exact config.
 export {
   Dataset,
-  MeshDataset,
   openDataset,
-  getDatasetCapabilities,
 } from "./dataset";
 export type {
   DatasetConfig,
+  DatasetConfigMap,
   DatasetChannel,
   DatasetDimension,
   DatasetCapabilities,
-  DatasetDefaults,
   DefaultLayersOptions,
 } from "./dataset";
+export { registerDataset } from "./registry";
+export type { DatasetFactory } from "./registry";
 
-export { BaseControl } from "./control";
-export {
-  BaseOverlay,
-  CrosshairOverlay,
-  RulerOverlay,
-  RoiSelectorOverlay,
-  MagnifierOverlay,
-  type MagnifierDimension,
-  type MagnifierOptions,
-  FoldablePanelOverlay,
-  type BaseOverlayOptions,
-  type CrosshairOverlayOptions,
-  type RulerOverlayOptions,
-  type RoiSelectorOverlayOptions,
-  type FoldablePanelOverlayOptions,
-  type MagnifierOverlayOptions,
-  type OverlayOptionsMap,
-  type RoiBox,
-  type RoiChangeKind,
-  type RoiChangePhase,
-  type RoiSelectionChange,
-  type RoiSelectionsChangeCallback,
-  type RoiActiveIndexChangeCallback,
-  type OverlayCornerPosition,
-  type OverlayLabelVariant,
-} from "./overlay";
-export {
-  BaseLayer,
-  MIN_VEC4_BUFFER,
-  type Geometry,
-  type Shader,
-  type LayerParams,
-  type LayerClass,
-  type LayerLoadStatus,
-  type LayerLoadState,
-} from "./layer";
-export {
-  TiledImageLayer,
-  type TileLevelContext,
-  type TileLevelGrid,
-  type TiledImageOptions,
-} from "./layer";
-
-// === Per-layer option bags + typed LayerConfig aliases ===
+// === Common vector/physical types ===
 export type {
-  VolumeOptions,
-  VolumeLayerConfig,
-  SliceOptions,
-  SliceLayerConfig,
-  SurfaceOptions,
-  SurfaceLayerConfig,
-  ShapesOptions,
-  ShapesLayerConfig,
-  PointsOptions,
-  PointsLayerConfig,
-  SegmentationOptions,
-  SegmentationLayerConfig,
-  VectorsOptions,
-  VectorsLayerConfig,
-  TracksOptions,
-  TracksLayerConfig,
-  NetworkOptions,
-  NetworkLayerConfig,
-} from "./layer";
-export { BaseView } from "./view";
+  ID,
+  Vec2,
+  Vec3,
+  PhysicalUnit,
+  PhysicalSpace,
+} from "./types";
 
-// === Theme ===
+// === Viewer config control option bags ===
+export type {
+  OrbitControlOptions,
+  FlyControlOptions,
+  PanZoomControlOptions,
+} from "./control";
+
+// === ROI event payload building blocks ===
+// The shapes inside `ViewerRoiChangeEvent`; the callback-bearing overlay
+// options stay in `galavi/advanced` (API-4).
+export type {
+  RoiBox,
+  RoiChangeKind,
+  RoiChangePhase,
+  RoiSelectionChange,
+} from "./overlay";
+
+// === Theme (app-facing helpers) ===
 export {
   DEFAULT_THEME,
   FUI_THEME,
@@ -188,33 +106,3 @@ export {
   type GalaviTheme,
   type DeepPartial,
 } from "./overlay/theme";
-
-// === Utils (public extension API) ===
-//
-// Reusable building blocks for plugin authors writing controls, layers, views,
-// or source adapters. Grouped by category:
-//
-//   - Camera math       — clampPitch, cameraDistance, cameraAngles,
-//                         computePosition, computeForward,
-//                         frameVolumeCamera, fitSliceCamera
-//   - Axes              — resolveAxes, AxisIndex, AxisMap
-//   - Geometry          — EMPTY_VERTEX_BUFFER, UNIT_CUBE, aabbFromPositions
-//   - Colormaps         — getColormapLUT, COLORMAP_NAMES, ColormapName,
-//                         APPEARANCE_PRESETS, resolveAppearancePreset,
-//                         AppearancePresetId, parseHexColor
-//   - Tile / pyramid    — TilePool, TileLoadQueue, TileManager, TileSource,
-//                         TileLoader, TilePlacement, TilePlan, TileCoord,
-//                         TilePoolConfig, planTiles, tileId, buildTileFetcher,
-//                         sourceChanged, resolveDataUrl,
-//                         countPyramidLevelTiles, pickPyramidLevel,
-//                         TileBounds, TileViewport,
-//                         planVolumePreview + VOLUME_PREVIEW_* budgets
-//                         (automatic volume tile-budget policy, DX-M4),
-//                         floatToFloat16, dtypeNormalization, makeFloat16Encoder
-//   - Input             — normalizeWheel, normalizeDrag
-//   - Vectors           — cameraBasis, subtract, cross, dot, normalize
-//
-export * from "./utils";
-
-// === Defaults (stable semantic constants) ===
-export { DEFAULT_FOV } from "./defaults";

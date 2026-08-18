@@ -15,7 +15,7 @@ import {
   type Geometry,
   type LayerConfig,
   type LayerParams,
-} from "../src/index";
+} from "../src/advanced";
 
 class ProbeLayer extends BaseLayer {
   static readonly layerType = "probe";

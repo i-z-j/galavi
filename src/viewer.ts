@@ -5,8 +5,11 @@
  *
  * - `ViewerEngine` + `createViewerEngine` — the low-level orchestrator and
  *   state authority. Holds the global State, manages global GPU, Render and
- *   Views. Composed directly by advanced integrations (and internally by the
- *   facade and the 3D magnifier loupe).
+ *   Views, and owns the runtime layer map (ARCH-1): one `BaseLayer` instance
+ *   per state-layer ID, shared by every referencing view, with one tracked
+ *   async load and one render-request channel per layer. Composed directly
+ *   by advanced integrations (and internally by the facade and the 3D
+ *   magnifier loupe).
  * - `Viewer` + `createViewer` — the high-level facade (DX-L1/L2/M3/M6): one
  *   dataset session with modes, channels, camera, controls, and tools,
  *   translated onto the engine's scene model (engineering-cleanup-plan.md
@@ -56,15 +59,15 @@ import type {
   RoiSelectorOverlayOptions,
   RulerOverlayOptions,
 } from "./overlay/options";
-import { openDataset, type Dataset, type DatasetConfig } from "./dataset";
-import { controlRegistry, overlayRegistry } from "./registry";
+import { Dataset, openDataset, type DatasetConfig } from "./dataset";
+import { controlRegistry, layerRegistry, overlayRegistry } from "./registry";
 import type {
   BaseControl,
   FlyControlOptions,
   OrbitControlOptions,
   PanZoomControlOptions,
 } from "./control";
-import type { BaseOverlay } from "./overlay";
+import type { BaseOverlay, RoiBox, RoiSelectionChange } from "./overlay";
 import {
   cameraAngles,
   cameraDistance,
@@ -88,6 +91,59 @@ type LayerAccessor<TOptions = Record<string, unknown>> = {
   setData(partial: Partial<Data>): void;
 };
 
+/**
+ * One layer update inside an {@link ViewerEngine.updateLayers} transaction
+ * (ARCH-2). `render` and `data` merge shallowly over the current config;
+ * `options` merges per key with the accessor's nested-object semantics (a
+ * plain-object value, e.g. `selection`, merges into the existing plain-object
+ * value; anything else replaces).
+ */
+export interface LayerPatch {
+  /** Target layer ID — must exist; an unknown ID fails the whole batch. */
+  id       : ID;
+  options? : Record<string, unknown>;
+  render?  : Partial<Render>;
+  data?    : Partial<Data>;
+}
+
+/**
+ * The layer `options` merge semantics shared by `updateLayers` and
+ * `layer(id).setOptions`: each key merges into the existing value when both
+ * are plain (non-array) objects — `selection: { c: 1 }` preserves sibling
+ * selection keys — and replaces otherwise.
+ */
+function mergeLayerOptions(target: LayerConfig, partial: Record<string, unknown>): void {
+  if (!target.options) target.options = {};
+  const options = target.options as Record<string, unknown>;
+  for (const [key, value] of Object.entries(partial)) {
+    const existing = options[key];
+    if (
+      existing && typeof existing === "object" && !Array.isArray(existing) &&
+      value    && typeof value    === "object" && !Array.isArray(value)
+    ) {
+      options[key] = {
+        ...(existing as Record<string, unknown>),
+        ...(value    as Record<string, unknown>),
+      };
+    } else {
+      options[key] = value;
+    }
+  }
+}
+
+/** Apply one patch to a (cloned) layer config: render/data shallow, options nested. */
+function applyLayerPatch(target: LayerConfig, patch: LayerPatch): void {
+  if (patch.render !== undefined) {
+    target.render = { ...(target.render ?? {}), ...patch.render };
+  }
+  if (patch.options !== undefined) {
+    mergeLayerOptions(target, patch.options);
+  }
+  if (patch.data !== undefined) {
+    target.data = { ...(target.data ?? {}), ...patch.data } as Data;
+  }
+}
+
 type ViewAccessor = {
   /**
    * Update a view overlay's options at runtime. Built-in overlay types
@@ -101,6 +157,11 @@ type ViewAccessor = {
       ? Partial<OverlayOptionsMap[K]>
       : Record<string, unknown>,
   ): void;
+  /**
+   * The runtime layer instance for `id` in this view (ARCH-1: the single
+   * engine-owned instance — every view referencing the same layer ID returns
+   * the same object), or undefined when the view does not reference it.
+   */
   getLayer(id: ID): BaseLayer | undefined;
   /**
    * Resolve once the layer reports `isReady` (see `BaseView.whenLayerReady`
@@ -132,6 +193,15 @@ export class ViewerEngine {
 
   private readonly _subscribers = new Set<(state: State) => void>();
 
+  /**
+   * The runtime layer map (ARCH-1): one `BaseLayer` instance per state-layer
+   * ID, built once at construction from `State.layers` and shared by every
+   * referencing view. Views receive references from this map — a surface OBJ
+   * referenced by four views is fetched/parsed once. Per-view GPU resources
+   * (pipelines, tile pools) remain per view/layer pair.
+   */
+  private readonly _runtimeLayers = new Map<ID, BaseLayer>();
+
   private _views              = new Map<string, ViewRuntime>();
   private _device?             : GPUDevice;
   private _activeViewId?       : string;
@@ -156,9 +226,18 @@ export class ViewerEngine {
     this._layers      = initial.layers;
     this._exploration = initial.exploration;
 
+    // Build the shared runtime layers and attach each one's render-request
+    // channel exactly once (the fan-out reads `_views` at signal time).
+    for (const desc of this._layers) {
+      if (this._runtimeLayers.has(desc.id)) continue; // first config wins
+      const layer = layerRegistry.create(desc.type, desc.id, desc);
+      layer.attach({ requestRender: () => this._onLayerSignal(layer) });
+      this._runtimeLayers.set(desc.id, layer);
+    }
+
     // Create Views
     for (const [name, vc] of Object.entries(config.views)) {
-      this._views.set(name, createView(name, vc, this._layers, this));
+      this._views.set(name, createView(name, vc, this._runtimeLayers, this));
     }
 
     // Auto-rotate: enabled by the first volume view that opts in.
@@ -186,6 +265,41 @@ export class ViewerEngine {
     for (const vr of this._views.values()) {
       vr.view.setDevice(this._device);
     }
+
+    // ARCH-1: one tracked async load per runtime layer, started once the GPU
+    // device exists (`initAsync`'s documented precondition). Each load's
+    // settle fans out to every referencing view; a failure is recorded on the
+    // layer (`loadStatus`/`loadError`) — handled here, never unhandled.
+    for (const layer of this._runtimeLayers.values()) {
+      layer.ensureLoaded().then(
+        () => this._onLayerLoadSettled(layer),
+        () => this._onLayerLoadSettled(layer),
+      );
+    }
+  }
+
+  /**
+   * Layer render-request fan-out (ARCH-1): the layer's single engine-owned
+   * channel lands here — settle every referencing view's readiness waiters
+   * and schedule one frame.
+   */
+  private _onLayerSignal(layer: BaseLayer): void {
+    for (const vr of this._views.values()) {
+      if (vr.layers.get(layer.id) === layer) vr.view.notifyLayerSignal(layer);
+    }
+    this.requestRender();
+  }
+
+  /**
+   * Tracked-load settle fan-out (ARCH-1): additionally rebuild each
+   * referencing view's per-layer GPU pipelines so freshly loaded data
+   * becomes drawable.
+   */
+  private _onLayerLoadSettled(layer: BaseLayer): void {
+    for (const vr of this._views.values()) {
+      if (vr.layers.get(layer.id) === layer) vr.view.handleLayerLoadSettled(layer);
+    }
+    this.requestRender();
   }
 
   private render(state: State): void {
@@ -279,18 +393,9 @@ export class ViewerEngine {
     if (!this._layers.some(l => l.id === id)) return undefined;
     const self = this;
 
-    // Each setter takes a fresh deep-clone of state, mutates the matching
-    // layer entry, and feeds it back through the normal commit path. This
-    // avoids holding a stale reference to a removed/reordered entry and
-    // means there is one and only one mutation site (`_commit`).
-    const updateLayer = (mutate: (layer: LayerConfig) => void): void => {
-      const next   = self.getState();
-      const target = next.layers.find(l => l.id === id);
-      if (!target) return;
-      mutate(target);
-      self._commit(next);
-    };
-
+    // Each setter is a one-patch `updateLayers` transaction (ARCH-2): the
+    // single-update and batch-update paths share one patch/merge logic, and
+    // there is one and only one mutation site (`_commit`).
     return {
       get config(): LayerConfig<TOptions> {
         const entry = self._layers.find(l => l.id === id)!;
@@ -302,35 +407,40 @@ export class ViewerEngine {
         } as LayerConfig<TOptions>;
       },
       setRender(partial: Partial<Render>): void {
-        updateLayer((layer) => {
-          layer.render = { ...(layer.render ?? {}), ...partial };
-        });
+        self.updateLayers([{ id, render: partial }]);
       },
       setOptions(partial: Partial<TOptions>): void {
-        updateLayer((layer) => {
-          if (!layer.options) layer.options = {};
-          for (const [key, value] of Object.entries(partial as Record<string, unknown>)) {
-            const existing = layer.options[key];
-            if (
-              existing && typeof existing === "object" && !Array.isArray(existing) &&
-              value    && typeof value    === "object" && !Array.isArray(value)
-            ) {
-              layer.options[key] = {
-                ...(existing as Record<string, unknown>),
-                ...(value    as Record<string, unknown>),
-              };
-            } else {
-              layer.options[key] = value;
-            }
-          }
-        });
+        self.updateLayers([{ id, options: partial as Record<string, unknown> }]);
       },
       setData(partial: Partial<Data>): void {
-        updateLayer((layer) => {
-          layer.data = { ...(layer.data ?? {}), ...partial } as Data;
-        });
+        self.updateLayers([{ id, data: partial }]);
       },
     };
+  }
+
+  /**
+   * Apply several layer patches as ONE atomic transaction (ARCH-2): every ID
+   * is validated before any mutation — an unknown ID throws, naming it, and
+   * leaves State completely unchanged. State is cloned once, all patches
+   * apply in order, and the result commits once: one subscriber notification,
+   * one scheduled render. An empty patch list is a no-op (no commit, no
+   * notify, no render). Use this for related multi-layer updates;
+   * `layer(id).set*` remains the single-update path, implemented through here.
+   */
+  updateLayers(patches: LayerPatch[]): void {
+    if (patches.length === 0) return;
+    const known = new Set(this._layers.map((l) => l.id));
+    for (const patch of patches) {
+      if (!known.has(patch.id)) {
+        throw new Error(`ViewerEngine.updateLayers: unknown layer id "${patch.id}"`);
+      }
+    }
+    const next = this.getState();
+    for (const patch of patches) {
+      const target = next.layers.find((l) => l.id === patch.id)!;
+      applyLayerPatch(target, patch);
+    }
+    this._commit(next);
   }
 
   /** Set the camera target position (mode-aware: orbit recomputes position). */
@@ -538,6 +648,10 @@ export class ViewerEngine {
     for (const vr of this._views.values()) {
       vr.view.destroy();
     }
+    // Detach the engine-owned render channels so late-settling loads go quiet.
+    for (const layer of this._runtimeLayers.values()) {
+      layer.detach();
+    }
     // Release the GPU device itself — destroyed ViewerEngine instances must not
     // keep counting against the browser's per-page WebGPU device limit.
     this._device?.destroy();
@@ -638,9 +752,9 @@ export function normalizeInitialState(state: State): State {
 
 /**
  * Visualization mode. `"auto"` resolves per dataset via
- * `Dataset.deriveDefaults()` (e.g. image datasets resolve volume vs slice
- * from their capabilities); unavailable modes are still exposed through
- * `viewer.availableModes`.
+ * `Dataset.capabilities.defaultMode` (e.g. 3D image datasets default to
+ * volume, 2D to slice); the modes a dataset can actually build are exposed
+ * through `viewer.availableModes`, and assigning an unavailable mode throws.
  */
 export type ViewerMode = "auto" | "slice" | "volume" | "quad";
 
@@ -690,17 +804,33 @@ export type ViewerMagnifierOptions = MagnifierOverlayOptions & {
 };
 
 /**
+ * High-level ROI tool options (API-4): the JSON-serializable subset of the
+ * low-level {@link RoiSelectorOverlayOptions}. The `onRoisChange` /
+ * `onActiveIndexChange` callbacks are excluded by type, and passing them
+ * anyway throws at runtime (never silently dropped). ROI changes reach the
+ * application through the typed Viewer events — `viewer.on("roiChange" |
+ * "roiActiveChange", handler)`; callback-bearing overlay options remain
+ * available on the low-level engine path
+ * (`view.setOverlayOptions("roiselector", ...)`, galavi/advanced).
+ */
+export type ViewerRoiOptions = Omit<
+  RoiSelectorOverlayOptions,
+  "onRoisChange" | "onActiveIndexChange"
+>;
+
+/**
  * Declarative tool set (DX-M6). Tools map to built-in overlays: crosshair →
  * `"crosshair"`, ruler → `"ruler"`, roi → `"roiselector"`, magnifier →
  * `"magnifier-2d"`/`"magnifier-3d"`. `true` enables with defaults, an options
- * bag enables with those options (same typed bag as the overlay), `false`/
- * absent disables. When `tools` is present it fully specifies the tool set.
+ * bag enables with those options, `false`/absent disables. When `tools` is
+ * present it fully specifies the tool set. Options bags are JSON-serializable
+ * intent (API-4): functions throw at validation.
  */
 export interface ViewerToolsConfig {
   crosshair? : boolean | CrosshairOverlayOptions;
   ruler?     : boolean | RulerOverlayOptions;
   magnifier? : false | "2d" | "3d" | ViewerMagnifierOptions;
-  roi?       : boolean | RoiSelectorOverlayOptions;
+  roi?       : boolean | ViewerRoiOptions;
 }
 
 /**
@@ -817,14 +947,56 @@ export interface ViewerControlOptionsMap {
 }
 export type ViewerControlName = keyof ViewerControlOptionsMap;
 
-/** Typed tool names and their option bags. */
+/** Typed tool names and their option bags (JSON-serializable — API-4). */
 export interface ViewerToolOptionsMap {
   crosshair : CrosshairOverlayOptions;
   ruler     : RulerOverlayOptions;
   magnifier : ViewerMagnifierOptions;
-  roi       : RoiSelectorOverlayOptions;
+  roi       : ViewerRoiOptions;
 }
 export type ViewerToolName = keyof ViewerToolOptionsMap;
+
+// ============================================================================
+// VIEWER EVENTS (API-4)
+// ============================================================================
+
+/**
+ * Payload of the high-level `"roiChange"` Viewer event: the full ROI list
+ * after the change, what changed, and where it happened (the interacting view
+ * plus the mode in effect — quad mode attaches one ROI overlay per view).
+ */
+export interface ViewerRoiChangeEvent {
+  /** Full ROI list after the change (physical coordinates). */
+  rois   : RoiBox[];
+  /** Which ROI changed, how, and whether this is a live drag or the commit. */
+  change : RoiSelectionChange;
+  /** The view the interaction happened in (e.g. `"main"`, `"quad-xy"`). */
+  viewId : string;
+  /** The resolved mode in effect when the change happened. */
+  mode   : ResolvedViewerMode;
+}
+
+/** Payload of the high-level `"roiActiveChange"` Viewer event. */
+export interface ViewerRoiActiveChangeEvent {
+  /** The newly active ROI index, or null when none is active. */
+  activeIndex : number | null;
+  /** The view the interaction happened in (e.g. `"main"`, `"quad-xy"`). */
+  viewId      : string;
+  /** The resolved mode in effect when the change happened. */
+  mode        : ResolvedViewerMode;
+}
+
+/**
+ * The typed high-level Viewer runtime events (API-4). Runtime notifications
+ * live here — never in {@link ViewerConfig}, which stays JSON-serializable.
+ * `viewer.on(name, handler)` returns an unsubscribe function; subscriptions
+ * survive open/mode rebuilds and are cleared on `destroy()`.
+ */
+export interface ViewerEventMap {
+  roiChange       : ViewerRoiChangeEvent;
+  roiActiveChange : ViewerRoiActiveChangeEvent;
+}
+export type ViewerEventName = keyof ViewerEventMap;
 
 // ============================================================================
 // ERRORS + VALIDATION
@@ -871,6 +1043,37 @@ function assertControlName(value: unknown): asserts value is ViewerControlName {
 function assertToolName(value: unknown): asserts value is ViewerToolName {
   if (!TOOL_NAMES.includes(value as ViewerToolName)) {
     throw new Error(`Unknown tool: ${JSON.stringify(value)} (expected one of: ${TOOL_NAMES.join(", ")})`);
+  }
+}
+
+const EVENT_NAMES: readonly ViewerEventName[] = ["roiChange", "roiActiveChange"];
+
+function assertEventName(value: unknown): asserts value is ViewerEventName {
+  if (!EVENT_NAMES.includes(value as ViewerEventName)) {
+    throw new Error(`Unknown viewer event: ${JSON.stringify(value)} (expected one of: ${EVENT_NAMES.join(", ")})`);
+  }
+}
+
+/**
+ * Reject functions in a high-level tool options bag (API-4): the Viewer
+ * config surface is JSON-serializable intent, so a function value means the
+ * caller wants a runtime callback — fail loudly with the supported path
+ * instead of letting the `viewer.config` JSON mirror silently drop it.
+ */
+function assertSerializableToolOptions(
+  name    : ViewerToolName,
+  options : Record<string, unknown>,
+  context : string,
+): void {
+  for (const [key, value] of Object.entries(options)) {
+    if (typeof value !== "function") continue;
+    throw new Error(
+      `${context}: tools.${name}.${key} is a function — high-level tool options are JSON-serializable only. ` +
+      (name === "roi"
+        ? 'Subscribe via viewer.on("roiChange" | "roiActiveChange", handler) for ROI notifications, ' +
+          'or use the low-level engine path: view.setOverlayOptions("roiselector", { onRoisChange }).'
+        : "Callback-bearing overlay options live on the low-level engine path: view.setOverlayOptions(...)."),
+    );
   }
 }
 
@@ -974,6 +1177,7 @@ function normalizeTools(
     if (name === "magnifier") {
       if (v === false || v === "2d" || v === "3d") out.magnifier = v;
       else if (typeof v === "object" && v !== null) {
+        assertSerializableToolOptions(name, v as Record<string, unknown>, context);
         const dim = (v as ViewerMagnifierOptions).dimension;
         if (dim !== undefined && dim !== "2d" && dim !== "3d") {
           throw new Error(`${context}: tools.magnifier.dimension must be "2d" or "3d"`);
@@ -985,7 +1189,10 @@ function normalizeTools(
       continue;
     }
     if (typeof v === "boolean") out[name] = v as never;
-    else if (typeof v === "object" && v !== null) out[name] = { ...(v as object) } as never;
+    else if (typeof v === "object" && v !== null) {
+      assertSerializableToolOptions(name, v as Record<string, unknown>, context);
+      out[name] = { ...(v as object) } as never;
+    }
     else throw new Error(`${context}: tools.${name} must be a boolean or an options object`);
   }
   return out;
@@ -1065,6 +1272,26 @@ function viewEntriesForMode(mode: ResolvedViewerMode): { id: string; kind: ViewK
   return [...QUAD_PLANES.map((p) => ({ id: p.id, kind: "slice" as const })), { id: QUAD_VOLUME_ID, kind: "volume" }];
 }
 
+/**
+ * Await structural readiness of every unique layer generated for `mode`
+ * (ARCH-1) — via each view that references it, so quad mode's layers spread
+ * across four views are all covered.
+ */
+function awaitGeneratedLayersReady(
+  engine : ViewerEngine,
+  config : ViewerEngineConfig,
+  mode   : ResolvedViewerMode,
+): Promise<unknown> {
+  const pending: Promise<unknown>[] = [];
+  for (const { id } of viewEntriesForMode(mode)) {
+    const view = engine.view(id);
+    for (const layerId of config.views[id]?.layers ?? []) {
+      pending.push(view.whenLayerReady(layerId));
+    }
+  }
+  return Promise.all(pending);
+}
+
 /** Layer id prefixes for a mode — `<prefix>-c<channelIndex>` (`volume-c0`, `quad-xy-c0`, …). */
 function layerPrefixesForMode(mode: ResolvedViewerMode): string[] {
   if (mode !== "quad") return [mode];
@@ -1130,12 +1357,13 @@ function mergeCamera(base: Camera, partial: Partial<Camera>): Camera {
 }
 
 /**
- * `"auto"` delegates to the dataset kind: `deriveDefaults().mode` decides
- * (e.g. image datasets resolve volume vs slice from their capabilities).
+ * `"auto"` delegates to the dataset's declared presentation contract:
+ * `capabilities.defaultMode` decides, exactly (e.g. 3D image datasets default
+ * to volume, 2D to slice, meshes to volume).
  */
 function resolveViewerMode(mode: ViewerMode, dataset: Dataset): ResolvedViewerMode {
   if (mode !== "auto") return mode;
-  return dataset.deriveDefaults().mode;
+  return dataset.capabilities.defaultMode;
 }
 
 // ============================================================================
@@ -1216,6 +1444,19 @@ export class Viewer {
   private _ready: Promise<Viewer>;
   private _destroyed = false;
 
+  /**
+   * High-level event subscriptions (API-4). They live on the Viewer — not on
+   * any engine/overlay instance — so they survive open/mode rebuilds; the
+   * forwarders are re-attached to each new scene's roiselector overlays.
+   * Cleared on `destroy()`.
+   */
+  private readonly _eventHandlers: {
+    [K in ViewerEventName]: Set<(event: ViewerEventMap[K]) => void>;
+  } = {
+    roiChange       : new Set(),
+    roiActiveChange : new Set(),
+  };
+
   // Viewer-owned DOM (container targets only).
   private _singleCanvas?: HTMLCanvasElement;
   private _quadGrid?: { el: HTMLElement; canvases: Record<string, HTMLCanvasElement> };
@@ -1286,11 +1527,14 @@ export class Viewer {
     return this._resolvedMode;
   }
 
-  /** Modes meaningful for the current dataset (§16: volume stays exposed for 3D data). */
+  /**
+   * Modes the current dataset can build, intersected with what the target
+   * layout can host (a caller-owned canvas cannot host `"quad"`). Before the
+   * first open — no dataset — every target-hostable mode is listed.
+   */
   get availableModes(): ResolvedViewerMode[] {
-    const caps = this._dataset?.capabilities;
-    if (!caps) return [...RESOLVED_MODES];
-    return caps.supports3D ? ["slice", "volume", "quad"] : ["slice"];
+    const modes = this._dataset?.capabilities.modes ?? RESOLVED_MODES;
+    return modes.filter((mode) => this._targetSupports(mode));
   }
 
   get projection(): ViewerProjection {
@@ -1327,35 +1571,69 @@ export class Viewer {
     if (this._autoRotate !== undefined) {
       config.autoRotate = typeof this._autoRotate === "object" ? { ...this._autoRotate } : this._autoRotate;
     }
-    // Round-trip through JSON: drops any callback a caller smuggled into a
-    // tools bag and proves the schema is function-free.
+    // Round-trip through JSON: proves the mirrored schema stays function-free
+    // (functions are rejected at entry by the tools validation — API-4).
     return JSON.parse(JSON.stringify(config)) as ViewerConfig;
   }
 
   // === Open / status (DX-M2) ===
 
   /**
-   * Open (or replace) the dataset. Resolves with the dataset once ready;
-   * rejects with the load error as-is (`cause` chains preserved) when the
-   * source fails, or with {@link ViewerSupersededError} when a newer
-   * open/transition wins. Last-write-wins: a superseded open never clobbers
-   * newer state.
+   * Open (or replace) the dataset from a declarative config: a fresh Dataset
+   * is constructed and loaded through the dataset registry, then owned by the
+   * Viewer. Resolves with the dataset once ready; rejects with the load error
+   * as-is (`cause` chains preserved) when the source fails, or with
+   * {@link ViewerSupersededError} when a newer open/transition wins.
+   * Last-write-wins: a superseded open never clobbers newer state.
    */
-  async open(config: DatasetConfig): Promise<Dataset> {
+  open(config: DatasetConfig): Promise<Dataset>;
+  /**
+   * Adopt an already-loaded Dataset (API-5 — e.g. one pre-opened via
+   * `openOMEZarrDataset` for its format metadata). Ownership transfers AT
+   * INVOCATION: after this call the caller must not dispose the instance,
+   * even if the returned promise rejects — the Viewer disposes it on
+   * supersession, replacement by a newer open, rebuild failure, and
+   * {@link destroy}. (An invocation that itself THROWS — e.g. on a destroyed
+   * viewer — never transfers ownership.) Same settlement contract as the
+   * config overload.
+   */
+  open(dataset: Dataset): Promise<Dataset>;
+  async open(source: DatasetConfig | Dataset): Promise<Dataset> {
     this._assertUsable("open");
     const revision = ++this._revision;
-    this._datasetConfig = config;
+    this._datasetConfig = source instanceof Dataset ? source.config : source;
     this._error = undefined;
     this._status = "loading";
-    const op = this._runOpen(config, revision);
+    const op = this._runOpen(source, revision);
     this._track(op);
     return op;
   }
 
-  private async _runOpen(config: DatasetConfig, revision: number): Promise<Dataset> {
+  private async _runOpen(source: DatasetConfig | Dataset, revision: number): Promise<Dataset> {
     let dataset: Dataset;
+    if (source instanceof Dataset) {
+      // Adoption (API-5): ownership transferred at invocation — from here on
+      // only the Viewer disposes this instance. No load, no second open.
+      dataset = source;
+    } else {
+      try {
+        dataset = await openDataset(source);
+      } catch (err) {
+        if (this._isCurrent(revision)) {
+          this._error = err;
+          this._status = "error";
+        }
+        throw err;
+      }
+    }
+    this._assertCurrent(revision, "open", () => dataset.dispose());
+    // The new dataset won the race — release the previous one (never the new
+    // instance itself: re-adopting the live dataset must not dispose it).
+    if (this._dataset !== dataset) this._dataset?.dispose();
+    this._dataset = dataset;
+    const mode = resolveViewerMode(this._mode, dataset);
     try {
-      dataset = await openDataset(config);
+      this._assertModeSupported(mode);
     } catch (err) {
       if (this._isCurrent(revision)) {
         this._error = err;
@@ -1363,15 +1641,54 @@ export class Viewer {
       }
       throw err;
     }
-    this._assertCurrent(revision, "open", () => dataset.dispose());
-    // The new dataset won the race — release the previous one.
-    this._dataset?.dispose();
-    this._dataset = dataset;
-    await this._rebuild(revision, resolveViewerMode(this._mode, dataset), undefined);
+    try {
+      await this._rebuild(revision, mode, undefined);
+    } catch (err) {
+      // Rebuild failure while this open is still current: the Viewer disposes
+      // the dataset it owns (API-5). A superseded open's dataset was already
+      // released by the winning replacement (or is still live under a newer
+      // mode transition) — never dispose twice.
+      if (this._isCurrent(revision)) {
+        dataset.dispose();
+        if (this._dataset === dataset) this._dataset = undefined;
+      }
+      throw err;
+    }
     return dataset;
   }
 
   // === Mode transitions (DX-L2) ===
+
+  /**
+   * Whether the target layout can host `mode`: a caller-owned canvas is a
+   * single view — `"quad"` needs the Viewer to own the 2×2 layout, so it is
+   * only available on selector/container targets.
+   */
+  private _targetSupports(mode: ResolvedViewerMode): boolean {
+    return mode !== "quad" || this._target.kind !== "canvas";
+  }
+
+  /**
+   * Reject a resolved mode the current dataset or target cannot host. Thrown
+   * BEFORE any engine teardown/rebuild, so a rejected assignment leaves the
+   * running scene untouched.
+   */
+  private _assertModeSupported(mode: ResolvedViewerMode): void {
+    const datasetModes = this._dataset?.capabilities.modes ?? [];
+    if (!datasetModes.includes(mode)) {
+      throw new Error(
+        `Mode "${mode}" is not supported by dataset kind "${this._dataset?.type}" ` +
+        `(available: ${datasetModes.join(", ") || "none"}). ` +
+        "Check viewer.availableModes before assigning.",
+      );
+    }
+    if (!this._targetSupports(mode)) {
+      throw new Error(
+        'viewer.mode = "quad" requires a container element (the Viewer lays out four ' +
+        "canvases); pass a container to createViewer instead of a canvas",
+      );
+    }
+  }
 
   /**
    * Switch visualization mode. Synchronous to call, asynchronous to complete
@@ -1379,20 +1696,19 @@ export class Viewer {
    * physical focus (the camera target survives; the new mode's fit framing is
    * translated onto it) and channel intent (the channel model reapplies to
    * the new mode's layers). Last-write-wins: rapid flips settle on the final
-   * mode.
+   * mode. Assigning a mode the dataset or target cannot host throws before
+   * anything is torn down.
    */
   set mode(value: ViewerMode) {
     this._assertUsable("mode");
     assertViewerMode(value);
-    this._mode = value;
-    if (!this._dataset) return; // intent recorded; resolved on open
-    const mode = resolveViewerMode(value, this._dataset);
-    if (mode === "quad" && this._target.kind === "canvas") {
-      throw new Error(
-        'viewer.mode = "quad" requires a container element (the Viewer lays out four ' +
-        "canvases); pass a container to createViewer instead of a canvas",
-      );
+    if (!this._dataset) {
+      this._mode = value; // intent recorded; resolved + validated on open
+      return;
     }
+    const mode = resolveViewerMode(value, this._dataset);
+    this._assertModeSupported(mode);
+    this._mode = value;
     if (mode === this._pendingMode) return; // already the latest intent
     this._pendingMode = mode;
     const revision = ++this._revision;
@@ -1584,6 +1900,11 @@ export class Viewer {
         if (!options || typeof options !== "object") {
           throw new Error(`viewer.tool("${name}").configure: options must be an object`);
         }
+        assertSerializableToolOptions(
+          name,
+          options as Record<string, unknown>,
+          `viewer.tool("${name}").configure`,
+        );
         if (name === "magnifier") {
           const dim = (options as ViewerMagnifierOptions).dimension;
           if (dim !== undefined && dim !== "2d" && dim !== "3d") {
@@ -1644,6 +1965,29 @@ export class Viewer {
     };
   }
 
+  // === Events (API-4) ===
+
+  /**
+   * Subscribe to a high-level Viewer runtime event (API-4) — the typed
+   * counterpart of the low-level overlay callbacks. Returns an unsubscribe
+   * function. One overlay change produces exactly one event, carrying the
+   * interacting view's id and the mode in effect. Subscriptions live on the
+   * Viewer, so they survive open/mode rebuilds; `destroy()` clears them.
+   */
+  on<K extends ViewerEventName>(
+    name    : K,
+    handler : (event: ViewerEventMap[K]) => void,
+  ): () => void {
+    this._assertUsable("on");
+    assertEventName(name);
+    if (typeof handler !== "function") {
+      throw new Error(`viewer.on("${name}"): handler must be a function, got ${typeof handler}`);
+    }
+    const handlers = this._eventHandlers[name] as Set<(event: ViewerEventMap[K]) => void>;
+    handlers.add(handler);
+    return () => { handlers.delete(handler); };
+  }
+
   // === Teardown ===
 
   /** Destroy the low-level instance, dispose the dataset, detach viewer-owned DOM, supersede in-flight work. */
@@ -1651,6 +1995,7 @@ export class Viewer {
     if (this._destroyed) return;
     this._destroyed = true;
     ++this._revision; // supersede any in-flight open/transition
+    for (const handlers of Object.values(this._eventHandlers)) handlers.clear();
     this._teardownEngine();
     this._dataset?.dispose();
     this._dataset = undefined;
@@ -1734,6 +2079,9 @@ export class Viewer {
       const byType = new Map<string, BaseOverlay>();
       keys.forEach((type, i) => byType.set(type, instances[i]));
       this._liveOverlays.set(id, byType);
+      // API-4: forward ROI overlay changes to the Viewer event surface.
+      const roiOverlay = byType.get("roiselector");
+      if (roiOverlay) this._wireRoiOverlay(roiOverlay, id);
     }
 
     const activeViewId = mode === "quad" ? QUAD_PLANES[0].id : MAIN_VIEW_ID;
@@ -1744,20 +2092,22 @@ export class Viewer {
     // not just where the camera looks).
     if (focus) this._syncSliceLayers(mode, focus);
 
-    // Surface any layer load failure with DX-M2 semantics. Layers carry the
-    // dataset's explicit pyramid/fetch, so they report ready immediately —
-    // this is the guard that keeps `open`'s "resolves ready" contract honest.
-    const view = engine.view(activeViewId);
-    for (const id of this._layerIdsForMode(mode)) {
-      const status = view.getLayerStatus(id);
-      if (status?.status === "error") {
-        const err = status.error ?? new Error(`Layer "${id}" failed to load`);
-        if (this._isCurrent(revision)) {
-          this._error = err;
-          this._status = "error";
-        }
-        throw err;
-      }
+    // ARCH-1: await structural readiness of every unique generated layer
+    // before reporting ready, through every view that references one
+    // (quad's layers live across four views — the active view alone does
+    // not see them all). Tiled layers resolve immediately — readiness means
+    // source/pyramid available, NOT full tile refinement. Source-backed
+    // layers (e.g. surfaces) settle once fetched/parsed, and a source
+    // failure rejects with the recorded load error.
+    try {
+      await awaitGeneratedLayersReady(engine, config, mode);
+    } catch (err) {
+      // A superseded rebuild's waiters reject on engine teardown — the
+      // supersession error wins over the teardown reason.
+      this._assertCurrent(revision, "mode transition", () => engine.destroy());
+      this._error = err;
+      this._status = "error";
+      throw err;
     }
     this._assertCurrent(revision, "mode transition");
     this._error = undefined;
@@ -1769,6 +2119,35 @@ export class Viewer {
     if (!this._resolvedMode) return;
     const revision = ++this._revision;
     this._track(this._rebuild(revision, this._resolvedMode, this._focus));
+  }
+
+  // === Event internals (API-4) ===
+
+  private _emit<K extends ViewerEventName>(name: K, event: ViewerEventMap[K]): void {
+    const handlers = this._eventHandlers[name] as Set<(event: ViewerEventMap[K]) => void>;
+    for (const handler of handlers) handler(event);
+  }
+
+  /**
+   * Attach the ROI event forwarders to a live roiselector overlay (API-4).
+   * Runs on every scene rebuild and on runtime tool attach, so Viewer-level
+   * subscriptions keep firing across engine rebuilds. The overlay only ever
+   * sees the forwarders — user callbacks never enter the overlay options
+   * through the high-level surface. View/mode identity resolves at event time.
+   */
+  private _wireRoiOverlay(overlay: BaseOverlay, viewId: string): void {
+    overlay.setOptions({
+      onRoisChange: (rois: RoiBox[], change: RoiSelectionChange) => {
+        const mode = this._resolvedMode;
+        if (!mode) return;
+        this._emit("roiChange", { rois, change, viewId, mode });
+      },
+      onActiveIndexChange: (activeIndex: number | null) => {
+        const mode = this._resolvedMode;
+        if (!mode) return;
+        this._emit("roiActiveChange", { activeIndex, viewId, mode });
+      },
+    });
   }
 
   // === Translation (§15.5) ===
@@ -1816,16 +2195,6 @@ export class Viewer {
         contrast : (patch.contrast ?? channel.contrast) as [number, number],
       };
     });
-  }
-
-  /** Layer IDs for every channel across the mode's views (`<prefix>-c<index>`). */
-  private _layerIdsForMode(mode: ResolvedViewerMode): string[] {
-    const dataset = this._requireDataset();
-    const ids: string[] = [];
-    for (const prefix of layerPrefixesForMode(mode)) {
-      for (const channel of dataset.channels) ids.push(`${prefix}-c${channel.index}`);
-    }
-    return ids;
   }
 
   /** Layer IDs of the mode's VOLUME layers (projection targets). */
@@ -2057,6 +2426,8 @@ export class Viewer {
             overlay.setOptions(options);
             base.addOverlay(overlay);
             live.set(type, overlay);
+            // API-4: forward ROI overlay changes to the Viewer event surface.
+            if (type === "roiselector") this._wireRoiOverlay(overlay, id);
             const parent = base.canvasElement?.parentElement;
             if (parent) {
               try {

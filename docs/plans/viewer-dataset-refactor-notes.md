@@ -1,5 +1,18 @@
 # Viewer + Dataset refactor notes
 
+> **Historical record (intermediate state).** This document records the
+> 2026-08-14 refactor as landed *at that date*. It is kept for migration
+> history and is **not current documentation**: it names removed APIs
+> (`createGalavi`, `Galavi`, `GalaviConfig`, `ResolvedDataset`,
+> `registerSource`, `SourceDescriptor`, the `@galavi/ome-zarr-adapter`
+> package) and describes an intermediate Dataset design that has since
+> changed — the `"image"` dataset kind is now `"ome-zarr"`,
+> `deriveDefaults()` is replaced by `capabilities` (`{ modes, defaultMode }`),
+> `zarrita` is a normal dependency (not an optional peer), and `sideEffects`
+> is narrowed to the `galavi/ome-zarr` entry. For the current architecture see
+> `../../DESIGN.md` and the 2026-08-17 corrections section in
+> `../../DX-AUDIT.md`.
+
 Date: 2026-08-14. Scope: `galavi` (primary), `galavi-examples` (migrated), `galavi-ome-zarr-adapter` (untouched, superseded), `cerevi-web` (read-only reference).
 
 ## What moved where

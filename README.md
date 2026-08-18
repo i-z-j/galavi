@@ -7,7 +7,7 @@ Galavi is a WebGPU visualization library for shared-state scientific viewers. It
 ## Features
 
 - **High-level `Viewer` API** — `createViewer(element, config)` gives you a complete scientific viewer in one call: dataset session, modes, channels, camera fit, controls/tools, and loading status from a single JSON-serializable `ViewerConfig`.
-- **`openDataset` dataset-kind registry** — format-neutral dataset contract (pyramid, physical space, channels, capabilities); kinds self-register via `registerDataset` (`"image"` comes from the `galavi/ome-zarr` subpath, `"mesh"` is built in).
+- **`openDataset` dataset-kind registry** — format-neutral dataset contract (physical space, normalized channels, mode capabilities; image datasets also expose the pyramid/fetch pair layers consume); kinds self-register via `registerDataset` with typed configs (`"ome-zarr"` comes from the `galavi/ome-zarr` subpath, `"mesh"` is built in).
 - WebGPU-native rendering for multi-view scientific scenes.
 - Shared, serializable `State` model — physical space, layers, exploration — diffable across view layouts.
 - Tile-based multi-resolution loading for large OME-Zarr and similar pyramidal datasets, with an automatic bounded volume tile-budget policy.
@@ -24,10 +24,13 @@ Galavi is a WebGPU visualization library for shared-state scientific viewers. It
 ## Install
 
 ```bash
-npm install galavi zarrita
+npm install galavi
 # or
-bun add galavi zarrita
+bun add galavi
 ```
+
+One package is enough: `zarrita` (the OME-Zarr store client used by the
+`galavi/ome-zarr` subpath) installs transitively.
 
 ## Quickstart
 
@@ -35,10 +38,10 @@ Two imports, one call — a complete viewer against an OME-Zarr store:
 
 ```ts
 import { createViewer } from "galavi";
-import "galavi/ome-zarr"; // registers the "image" dataset kind (OME-Zarr)
+import "galavi/ome-zarr"; // registers the "ome-zarr" dataset kind
 
 const viewer = await createViewer("#app", {
-  dataset: { type: "image", source: "https://server/data.zarr" },
+  dataset: { type: "ome-zarr", source: "https://server/data.zarr" },
 });
 ```
 
@@ -46,11 +49,12 @@ Every config key has an imperative equivalent: `viewer.mode = "volume"`,
 `viewer.projection = "mip"`, `viewer.channel(1).configure({ contrast: [0.02, 0.2] })`,
 `viewer.tool("ruler").enable()`, `await viewer.open(dataset)`.
 
-Use the low-level **`createViewerEngine`** API instead when you need what the
-Viewer does not own: arbitrary multi-view composition, custom registered
-layers/controls/overlays/views, non-image layers, or explicit scene-`State`
-serialization. `viewer.engine` is the escape hatch for one-off advanced
-operations. See [DESIGN.md](./DESIGN.md) for the layering and ownership model.
+Use the low-level **`createViewerEngine`** API from `galavi/advanced` instead
+when you need what the Viewer does not own: arbitrary multi-view composition,
+custom registered layers/controls/overlays/views, non-image layers, or
+explicit scene-`State` serialization. `viewer.engine` is the escape hatch for
+one-off advanced operations. See [DESIGN.md](./DESIGN.md) for the layering and
+ownership model.
 
 ## References
 

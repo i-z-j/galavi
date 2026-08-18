@@ -6,7 +6,8 @@
  */
 
 import type { LayerConfig } from "./types";
-import type { Dataset, DatasetConfig } from "./dataset/base";
+import type { Dataset, DatasetConfig, DatasetConfigMap } from "./dataset/base";
+import { MeshDataset } from "./dataset/mesh";
 import {
   BaseLayer,
   VolumeLayer,
@@ -51,14 +52,23 @@ import {
 export class Registry<T, F extends (...args: any[]) => T> {
   private factories?: Map<string, F>;
   private readonly buildBuiltins: () => Record<string, F>;
+  private readonly duplicateError?: (type: string) => Error;
 
   /**
    * Built-ins are lazy. The thunk runs on first access so concrete classes
    * (which import from this module's siblings) finish initializing first —
    * registry.ts sits at the top of the import cycle.
+   *
+   * `duplicateError`, when set, makes `register` reject an already-registered
+   * key instead of silently overriding it (used by the dataset registry,
+   * where a duplicate key means two loaders are fighting over one identity).
    */
-  constructor(buildBuiltins: () => Record<string, F>) {
+  constructor(
+    buildBuiltins: () => Record<string, F>,
+    duplicateError?: (type: string) => Error,
+  ) {
     this.buildBuiltins = buildBuiltins;
+    this.duplicateError = duplicateError;
   }
 
   private getFactories(): Map<string, F> {
@@ -68,9 +78,14 @@ export class Registry<T, F extends (...args: any[]) => T> {
     return this.factories;
   }
 
-  /** Register a custom factory (overrides built-ins of the same key) */
+  /**
+   * Register a custom factory. Overrides an existing key unless the registry
+   * was constructed with a `duplicateError` (then a duplicate throws).
+   */
   register(type: string, factory: F): void {
-    this.getFactories().set(type, factory);
+    const factories = this.getFactories();
+    if (this.duplicateError && factories.has(type)) throw this.duplicateError(type);
+    factories.set(type, factory);
   }
 
   /** Create an instance. Throws if type is unknown. */
@@ -159,10 +174,28 @@ export const viewRegistry    = new Registry<BaseView, ViewFactory>(() =>
 export type DatasetFactory = (config: DatasetConfig) => Dataset;
 
 /**
- * Dataset kinds register here (no built-ins — kind modules self-register).
- * Type-only base import: registry.ts never imports dataset kind modules.
+ * Dataset kinds register here. The built-in `"mesh"` loader is a LAZY
+ * built-in (resolved on first registry access, like every other registry
+ * above) so the core entry stays free of module-load side effects — only the
+ * `galavi/ome-zarr` subpath registers on import, by design (API-6). Kind
+ * modules otherwise never get imported by this module.
+ *
+ * A dataset kind key is a loader identity: re-registering an existing key
+ * throws (naming the key) instead of silently replacing the loader — tests
+ * and plugins register unique keys (and `unregister` afterwards).
  */
-export const datasetRegistry = new Registry<Dataset, DatasetFactory>(() => ({}));
+export const datasetRegistry = new Registry<Dataset, DatasetFactory>(
+  // The thunk runs on first access, so the MeshDataset binding resolves
+  // after every sibling module has finished initializing.
+  () => ({
+    mesh: (config) => new MeshDataset(config),
+  }),
+  (kind) => new Error(
+    `Duplicate dataset kind registration: "${kind}" is already registered. ` +
+    "Dataset loader keys are unique — choose a distinct key " +
+    "(tests: unregister the key again in teardown).",
+  ),
+);
 
 // ============================================================================
 // CUSTOM REGISTRATION HELPERS (for advanced 3rd-party developers)
@@ -188,7 +221,15 @@ export function registerView(type: string, factory: ViewFactory): void {
   viewRegistry.register(type, factory);
 }
 
-/** Register a dataset kind — the single dataset/source extension point. */
-export function registerDataset(kind: string, factory: DatasetFactory): void {
-  datasetRegistry.register(kind, factory);
+/**
+ * Register a dataset kind — the single dataset/source extension point. The
+ * kind must be a key of `DatasetConfigMap` (format packages augment that map
+ * via `declare module "galavi"`), which types the factory's config exactly.
+ * Re-registering an existing key throws, naming the conflicting key.
+ */
+export function registerDataset<K extends keyof DatasetConfigMap>(
+  kind    : K,
+  factory : (config: DatasetConfigMap[K]) => Dataset,
+): void {
+  datasetRegistry.register(kind, factory as DatasetFactory);
 }

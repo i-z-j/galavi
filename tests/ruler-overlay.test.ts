@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { FUI_THEME, RulerOverlay, type State } from '../src/index'
+import { FUI_THEME, RulerOverlay, type State } from '../src/advanced'
 import { afterEach, describe, expect, it } from 'vitest'
 
 describe('Galavi ruler overlay', () => {

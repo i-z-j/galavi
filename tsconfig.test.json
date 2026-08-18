@@ -1,5 +1,17 @@
 {
   "extends": "./tsconfig.json",
+  "compilerOptions": {
+    /*
+     * Self-reference: tests exercise the consumer-facing augmentation pattern
+     * (`declare module "galavi"` extending `DatasetConfigMap`, the way an
+     * external format package would); this maps the public name onto the
+     * SOURCE entry so those augmentations resolve locally. Type-only — no
+     * test imports the self-name at runtime. (src/ itself never references
+     * "galavi": the ome-zarr entry augments "./base" directly so the emitted
+     * declarations keep a working relative specifier.)
+     */
+    "paths": { "galavi": ["./src/index.ts"] }
+  },
   "include": ["src/**/*", "tests/**/*", "vitest.config.ts"],
   "exclude": ["dist", "node_modules"]
 }

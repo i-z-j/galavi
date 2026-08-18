@@ -2,6 +2,7 @@
  * Galavi Type Definitions
  */
 
+import type { SurfaceGeometry } from "./layer/surface/main";
 import type { DeepPartial, GalaviTheme } from "./overlay/theme";
 import type { OverlayOptionsMap } from "./overlay/options";
 import type {
@@ -91,7 +92,12 @@ export interface ViewConfig {
   type          : string;
   /** Canvas element to render into. Omit for delayed mounting via engine.mount(). */
   canvas?       : HTMLCanvasElement;
-  /** Layers (IDs) to render in this view (must match IDs in state.layers) */
+  /**
+   * Layers (IDs) to render in this view (must match IDs in state.layers).
+   * Each ID resolves to the single runtime layer instance owned by the
+   * ViewerEngine — views referencing the same ID share that instance
+   * (ARCH-1); per-view GPU resources stay per view/layer pair.
+   */
   layers        : ID[];
   /** Controls to attach, keyed by control type (e.g. { orbit: {}, fly: {} }) */
   controls?     : ControlOptions;
@@ -285,6 +291,15 @@ export interface Data {
     selection?: Record<string, number>;
     signal?: AbortSignal;
   }) => Promise<ArrayBuffer>;
+
+  /**
+   * Pre-parsed surface geometry, handed in by a dataset that already fetched
+   * and parsed the source during `load()` (e.g. `MeshDataset`). Consumed by
+   * surface-style layers: when present, the layer adopts the geometry
+   * directly — no network request, no second parse (ARCH-1). `url` still
+   * identifies the source for change detection and diagnostics.
+   */
+  geometry?: SurfaceGeometry;
 
   transform?: number[]; // Optional 4×4 affine matrix, column-major
 }
