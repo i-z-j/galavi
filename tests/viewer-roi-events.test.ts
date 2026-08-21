@@ -263,10 +263,8 @@ describe("viewer ROI events (API-4)", () => {
     viewer.on("roiChange", (event) => changes.push(event));
 
     const before = roiOverlay(viewer);
-    viewer.mode = "volume";
-    await viewer.ready;
-    viewer.mode = "slice";
-    await viewer.ready;
+    await viewer.setMode("volume");
+    await viewer.setMode("slice");
 
     const after = roiOverlay(viewer);
     expect(after).not.toBe(before); // the scene really rebuilt

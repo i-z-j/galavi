@@ -69,6 +69,14 @@ const BLEND_ORDER: Record<string, number> = {
   minimum    : 2,
 };
 
+/**
+ * Settle window for the zero-size host diagnostic when no ResizeObserver is
+ * active (autoResize off, or the environment lacks ResizeObserver): layout
+ * has had this long to give the canvas a nonzero content box before the view
+ * warns.
+ */
+const ZERO_SIZE_SETTLE_MS = 100;
+
 export function sortedByBlending(layers: readonly BaseLayer[]): BaseLayer[] {
   return [...layers].sort(
     (a, b) => (BLEND_ORDER[a.blending] ?? 1) - (BLEND_ORDER[b.blending] ?? 1),
@@ -268,10 +276,12 @@ export abstract class BaseView {
     }
 
     this.observeCanvasResize(canvas);
+    this.scheduleZeroSizeDiagnostic(canvas);
   }
 
   unmount(): void {
     this.unobserveCanvasResize();
+    this.cancelZeroSizeDiagnostic();
     this.disableEvents();
     this.context?.unconfigure();
     for (const overlay of this.overlays) {
@@ -686,12 +696,20 @@ export abstract class BaseView {
    * off or ResizeObserver is unavailable, e.g. headless tests). On a change
    * the canvas backing store is re-sized immediately, the viewport hook fires,
    * and a frame is requested so the new size is actually drawn.
+   *
+   * The observer's FIRST delivery doubles as the settled-layout signal for
+   * the zero-size host diagnostic ({@link scheduleZeroSizeDiagnostic}).
    */
   private observeCanvasResize(canvas: HTMLCanvasElement): void {
     this.unobserveCanvasResize();
     if (!this.autoResize) return;
     if (typeof ResizeObserver === "undefined") return;
+    let firstDelivery = true;
     this.resizeObserver = new ResizeObserver(() => {
+      if (firstDelivery) {
+        firstDelivery = false;
+        this.checkZeroSizeHost(canvas);
+      }
       if (this.resizeCanvasToDisplaySize()) this.onViewportChanged();
       this.engine?.requestRender();
     });
@@ -701,6 +719,58 @@ export abstract class BaseView {
   private unobserveCanvasResize(): void {
     this.resizeObserver?.disconnect();
     this.resizeObserver = undefined;
+  }
+
+  // === Zero-size host diagnostic ===
+
+  /**
+   * Whether the zero-area warning already fired for this view — the
+   * diagnostic is ONE console.warn per affected view, never per frame or
+   * per resize.
+   */
+  private zeroSizeWarned = false;
+  private zeroSizeTimer?: ReturnType<typeof setTimeout>;
+
+  /**
+   * Zero-area host diagnostic (development aid, never a hard error): a host
+   * element with zero layout area yields a 1×1-clamped backing store and an
+   * invisible view that still reports ready. Zero size can be transient
+   * during layout, so the check runs once initial layout has settled — on
+   * the resize observer's first delivery when one is active, else after a
+   * short settle window. The 1×1 clamp stays the runtime behavior either
+   * way.
+   */
+  private scheduleZeroSizeDiagnostic(canvas: HTMLCanvasElement): void {
+    this.cancelZeroSizeDiagnostic();
+    if (this.zeroSizeWarned) return;
+    if (this.resizeObserver) return; // the observer's first delivery runs the check
+    this.zeroSizeTimer = setTimeout(() => {
+      this.zeroSizeTimer = undefined;
+      this.checkZeroSizeHost(canvas);
+    }, ZERO_SIZE_SETTLE_MS);
+  }
+
+  private cancelZeroSizeDiagnostic(): void {
+    if (this.zeroSizeTimer !== undefined) {
+      clearTimeout(this.zeroSizeTimer);
+      this.zeroSizeTimer = undefined;
+    }
+  }
+
+  /** Warn once when the canvas content box measured zero-area. */
+  private checkZeroSizeHost(canvas: HTMLCanvasElement): void {
+    if (this.zeroSizeWarned) return;
+    const width = canvas.clientWidth;
+    const height = canvas.clientHeight;
+    if (width > 0 && height > 0) return;
+    this.zeroSizeWarned = true;
+    console.warn(
+      `[galavi] view "${this.id}": the canvas content box is zero-area ` +
+      `(${width}×${height} CSS px) after mount settled — the backing store is ` +
+      "clamped to 1×1 and the view renders nothing. Likely causes: missing " +
+      "CSS width/height on the canvas or its container, an unstyled " +
+      "container, or display: none.",
+    );
   }
 
   private resizeCanvasToDisplaySize(): boolean {

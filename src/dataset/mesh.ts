@@ -21,8 +21,31 @@ import type { Data, LayerConfig } from "../types";
 import { aabbFromPositions } from "../utils";
 import {
   Dataset,
+  type DatasetConfigMap,
   type DefaultLayersOptions,
 } from "./base";
+
+/**
+ * Named descriptor for the built-in `"mesh"` dataset kind — the declarative
+ * config for one OBJ mesh, for `ViewerConfig.dataset` / `openDataset`:
+ *
+ * ```ts
+ * import { createViewer, mesh } from "galavi";
+ * const viewer = await createViewer("#app", { dataset: mesh("https://server/mesh.obj") });
+ * ```
+ *
+ * The return is plain JSON — exactly `{ type: "mesh", source }`, the
+ * `DatasetConfigMap["mesh"]` member — so it round-trips through
+ * `JSON.parse(JSON.stringify(...))` unchanged and never carries runtime
+ * resources (the fetch happens later, inside `load()`). The `"mesh"` loader
+ * is a lazy built-in of the core entry (no side-effect import needed), which
+ * is why this helper lives on the root `galavi` entry — unlike format
+ * subpath helpers such as `omeZarr` from `galavi/ome-zarr`, whose import
+ * performs that kind's registration.
+ */
+export function mesh(source: string): DatasetConfigMap["mesh"] {
+  return { type: "mesh", source };
+}
 
 export class MeshDataset extends Dataset {
   /**

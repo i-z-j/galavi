@@ -56,6 +56,7 @@ export type {
 // (galavi/ome-zarr) and augment DatasetConfigMap with their exact config.
 export {
   Dataset,
+  mesh,
   openDataset,
 } from "./dataset";
 export type {

@@ -23,7 +23,7 @@ export type {
 // The built-in mesh kind (its registration is a lazy datasetRegistry
 // built-in — registry.ts; never import `./ome-zarr` here, it is the
 // `galavi/ome-zarr` subpath entry).
-export { MeshDataset } from "./mesh";
+export { MeshDataset, mesh } from "./mesh";
 
 /**
  * Kinds that live outside the core entry: the unknown-kind error names the

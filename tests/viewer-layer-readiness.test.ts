@@ -304,13 +304,12 @@ describe("Viewer awaits generated layer readiness (ARCH-1)", () => {
     }
   });
 
-  test("a quad layer failure rejects viewer.ready through a non-active view", async () => {
+  test("a quad layer failure rejects the transition through a non-active view", async () => {
     // quad-yz is not the active view — the old snapshot check never saw it.
     const viewer = track(await createViewer(makeFakeContainer(), { dataset: DESC }));
     expect(viewer.resolvedMode).toBe("volume");
     failing.set("mem://surf-quad-yz.obj", 404);
-    viewer.mode = "quad";
-    await expect(viewer.ready).rejects.toThrow("Surface fetch failed: 404");
+    await expect(viewer.setMode("quad")).rejects.toThrow("Surface fetch failed: 404");
     expect(viewer.status).toBe("error");
   });
 
@@ -320,8 +319,7 @@ describe("Viewer awaits generated layer readiness (ARCH-1)", () => {
 
     gates.set("mem://surf-quad-xy.obj", makeGate());
     let settled = false;
-    viewer.mode = "quad";
-    const transition = viewer.ready.then(() => { settled = true; });
+    const transition = viewer.setMode("quad").then(() => { settled = true; });
     await flushMicrotasks();
     expect(settled).toBe(false); // gated on quad-xy's layer
 

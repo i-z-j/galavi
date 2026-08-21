@@ -8,18 +8,20 @@
  * augmented, and third-party-style kinds coexist in one registry.
  *
  * `../src/dataset/ome-zarr` is imported for its `DatasetConfigMap`
- * augmentation, mirroring a consumer's `import "galavi/ome-zarr"`.
+ * augmentation, mirroring a consumer's `import "galavi/ome-zarr"` — the
+ * named `omeZarr` descriptor import evaluates the same module.
  */
 import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   Dataset,
+  mesh,
   openDataset,
   registerDataset,
   type DatasetConfig,
 } from "../src/index";
 import { datasetRegistry } from "../src/registry";
 import type { LayerConfig } from "../src/types";
-import "../src/dataset/ome-zarr";
+import { omeZarr } from "../src/dataset/ome-zarr";
 
 // ============================================================================
 // EXACT CONFIG TYPING (compile-time)
@@ -33,6 +35,22 @@ const omeZarrConfig: DatasetConfig = {
   type: "ome-zarr",
   source: "https://example.test/image.ome.zarr",
 };
+
+// The named descriptor helpers build exactly the DatasetConfigMap members.
+const helperZarr: DatasetConfig = omeZarr("https://example.test/image.ome.zarr");
+const helperMesh: DatasetConfig = mesh("mem://mesh.obj");
+
+// @ts-expect-error — `source` is required
+omeZarr();
+
+// @ts-expect-error — `source` must be a string
+omeZarr(42);
+
+// @ts-expect-error — `source` must be a string
+mesh(undefined);
+
+// @ts-expect-error — descriptor helpers take no runtime options bag
+mesh("mem://mesh.obj", { fetch: () => Promise.resolve(new ArrayBuffer(0)) });
 
 // @ts-expect-error — `source` is required
 const missingSource: DatasetConfig = { type: "ome-zarr" };
@@ -102,6 +120,13 @@ describe("DatasetConfigMap", () => {
     expect(JSON.parse(JSON.stringify(configs))).toEqual(configs);
   });
 
+  test("the descriptor helpers return exact, JSON-pure configs", () => {
+    expect(helperZarr).toEqual({ type: "ome-zarr", source: "https://example.test/image.ome.zarr" });
+    expect(helperMesh).toEqual({ type: "mesh", source: "mem://mesh.obj" });
+    expect(JSON.parse(JSON.stringify(helperZarr))).toEqual(helperZarr);
+    expect(JSON.parse(JSON.stringify(helperMesh))).toEqual(helperMesh);
+  });
+
   test("OME-Zarr, mesh, and an OME-TIFF fixture coexist in one registry", () => {
     expect(datasetRegistry.keys()).toEqual(
       expect.arrayContaining(["mesh", "ome-zarr", "ome-tiff"]),
@@ -117,5 +142,15 @@ describe("DatasetConfigMap", () => {
       // @ts-expect-error — "nope" is not a loader identity
       openDataset({ type: "nope", source: "mem://x" }),
     ).rejects.toThrow(/Unknown dataset kind: "nope"/);
+  });
+
+  test("helper descriptors dispatch to their loaders", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("not found", { status: 404 })));
+    // The omeZarr descriptor reaches ImageDataset (its wrapped open error)…
+    await expect(openDataset(omeZarr("https://example.test/x.zarr"))).rejects.toThrow(
+      /Failed to open OME-Zarr dataset/,
+    );
+    // …and the mesh descriptor reaches MeshDataset (its fetch failure).
+    await expect(openDataset(mesh("mem://missing.obj"))).rejects.toThrow(/Mesh fetch failed: 404/);
   });
 });

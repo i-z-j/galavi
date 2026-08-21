@@ -663,11 +663,78 @@ export class ViewerEngine {
 // FACTORY
 // ============================================================================
 
+/** Throw `signal.reason` (an `AbortError` DOMException by default) when aborted. */
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw signal.reason as unknown;
+}
+
+/**
+ * Settle with `operation`, but reject with `signal.reason` as soon as the
+ * signal aborts. `operation` itself is not cancelled — the caller decides how
+ * to drain it (createViewerEngine awaits its settlement before teardown).
+ */
+function racedAgainstAbort(operation: Promise<unknown>, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(signal.reason as unknown);
+    signal.addEventListener("abort", onAbort, { once: true });
+    operation.then(
+      ()    => { signal.removeEventListener("abort", onAbort); resolve(); },
+      (err) => { signal.removeEventListener("abort", onAbort); reject(err); },
+    );
+  });
+}
+
+/**
+ * Options for {@link createViewerEngine}.
+ */
+export interface CreateViewerEngineOptions {
+  /**
+   * Cancellation for the creation itself. When the signal aborts — before GPU
+   * initialization, while views mount, or during the `"layers"` wait — the
+   * returned promise rejects with `signal.reason` (an `AbortError`
+   * DOMException by default, matching `view(id).whenLayerReady`) and the
+   * partially created engine is destroyed before the rejection propagates:
+   * mounted views unmounted, runtime layers detached, the GPU device
+   * released. No render or subscription activity happens after teardown.
+   * Aborting after the promise resolved has no effect — the engine is the
+   * caller's by then.
+   */
+  signal?: AbortSignal;
+  /**
+   * The readiness bar for the returned promise (default `"mounted"`):
+   *
+   * - `"mounted"` — resolve once the GPU is initialized and every configured
+   *   canvas is mounted (the historical behavior). Layer loads may still be
+   *   in flight; observe them per layer via `view(id).whenLayerReady`.
+   * - `"layers"` — additionally await STRUCTURAL readiness of every unique
+   *   configured layer across all views: each layer's source/pyramid is
+   *   available (the same definition the high-level `Viewer` applies before
+   *   reporting `ready`). This is NOT first presented pixels — tiled layers
+   *   keep refining resolution afterward. A layer whose source fails rejects
+   *   with its recorded load error; the engine is destroyed on rejection.
+   *
+   * Layer loads are GPU-gated, so `"layers"` initializes the GPU even when
+   * no view carries a canvas.
+   */
+  waitUntil?: "mounted" | "layers";
+}
+
 /**
  * Create a ViewerEngine instance from a ViewerEngineConfig.
  * Initialises GPU and mounts views that have a canvas specified.
+ *
+ * Creation is transactional: when the returned promise rejects (GPU init or
+ * mount failure, a failed layer under `waitUntil: "layers"`, or abort), the
+ * engine is destroyed before the rejection propagates — a rejecting factory
+ * never hands out the instance, so it must not leave owned resources behind.
+ * The original error is rethrown unchanged; cleanup never masks it.
  */
-export async function createViewerEngine(config: ViewerEngineConfig): Promise<ViewerEngine> {
+export async function createViewerEngine(
+  config  : ViewerEngineConfig,
+  options : CreateViewerEngineOptions = {},
+): Promise<ViewerEngine> {
+  const { signal, waitUntil = "mounted" } = options;
+  throwIfAborted(signal);
   const engine = new ViewerEngine(config);
 
   const canvasMap: Record<string, HTMLCanvasElement> = {};
@@ -675,8 +742,29 @@ export async function createViewerEngine(config: ViewerEngineConfig): Promise<Vi
     if (vc.canvas) canvasMap[name] = vc.canvas;
   }
 
-  if (Object.keys(canvasMap).length > 0) {
-    await engine.mountAll(canvasMap);
+  let mount: Promise<void> | undefined;
+  try {
+    if (Object.keys(canvasMap).length > 0) {
+      mount = engine.mountAll(canvasMap);
+      if (signal) await racedAgainstAbort(mount, signal);
+      else await mount;
+    } else if (waitUntil === "layers") {
+      // Layer loads start with GPU init; with no canvases nothing mounts, so
+      // the "layers" bar initializes the GPU explicitly.
+      await engine.initGPU();
+    }
+    throwIfAborted(signal);
+    if (waitUntil === "layers") {
+      await awaitConfiguredLayersReady(engine, config.views, signal);
+    }
+  } catch (err) {
+    // An abort can win the race while the mount is still in flight: drain it
+    // first (its own error never replaces the abort reason) so destroy() runs
+    // exactly once over a fully settled engine — a GPU device assigned
+    // mid-flight is released here, never leaked.
+    if (mount) await mount.catch(() => {});
+    engine.destroy();
+    throw err;
   }
 
   return engine;
@@ -864,9 +952,15 @@ export type ViewerModeOverrides = Partial<Record<ResolvedViewerMode, ViewerModeO
  * contract: no callbacks, no runtime resources.
  */
 export interface ViewerConfig {
-  /** Dataset config; opened via `openDataset` (dataset registry). */
+  /**
+   * Dataset config; opened via `openDataset` (dataset registry). Write the
+   * descriptor literally or build it with the format's named helper —
+   * `omeZarr(source)` from `galavi/ome-zarr`, `mesh(source)` from the root
+   * entry — which keeps loader selection explicit (importing `galavi/ome-zarr`
+   * is what registers the `"ome-zarr"` kind).
+   */
   dataset?       : DatasetConfig;
-  /** Visualization mode (default `"auto"`). */
+  /** Visualization mode (default `"auto"`). Imperative equivalent: `await viewer.setMode(mode)`. */
   mode?          : ViewerMode;
   /** Channel overrides over the dataset's normalized channels. */
   channels?      : ViewerChannelConfig[];
@@ -1273,6 +1367,33 @@ function viewEntriesForMode(mode: ResolvedViewerMode): { id: string; kind: ViewK
 }
 
 /**
+ * Await structural readiness of every unique layer referenced by `views`
+ * (ARCH-1): each layer ID is awaited once, through the FIRST view that
+ * references it — views share one runtime layer instance per ID, so
+ * duplicates across views settle together and are skipped. Resolves when
+ * every layer reports `isReady`; rejects with the first layer's recorded
+ * load error, or with `signal.reason` on abort.
+ */
+function awaitConfiguredLayersReady(
+  engine  : ViewerEngine,
+  views   : Record<string, ViewConfig>,
+  signal? : AbortSignal,
+): Promise<unknown> {
+  const seen = new Set<ID>();
+  const pending: Promise<unknown>[] = [];
+  for (const [viewId, viewConfig] of Object.entries(views)) {
+    let view: ViewAccessor | undefined;
+    for (const layerId of viewConfig.layers ?? []) {
+      if (seen.has(layerId)) continue;
+      seen.add(layerId);
+      view ??= engine.view(viewId);
+      pending.push(view.whenLayerReady(layerId, { signal }));
+    }
+  }
+  return Promise.all(pending);
+}
+
+/**
  * Await structural readiness of every unique layer generated for `mode`
  * (ARCH-1) — via each view that references it, so quad mode's layers spread
  * across four views are all covered.
@@ -1282,14 +1403,12 @@ function awaitGeneratedLayersReady(
   config : ViewerEngineConfig,
   mode   : ResolvedViewerMode,
 ): Promise<unknown> {
-  const pending: Promise<unknown>[] = [];
+  const views: Record<string, ViewConfig> = {};
   for (const { id } of viewEntriesForMode(mode)) {
-    const view = engine.view(id);
-    for (const layerId of config.views[id]?.layers ?? []) {
-      pending.push(view.whenLayerReady(layerId));
-    }
+    const viewConfig = config.views[id];
+    if (viewConfig) views[id] = viewConfig;
   }
-  return Promise.all(pending);
+  return awaitConfiguredLayersReady(engine, views);
 }
 
 /** Layer id prefixes for a mode — `<prefix>-c<channelIndex>` (`volume-c0`, `quad-xy-c0`, …). */
@@ -1517,7 +1636,10 @@ export class Viewer {
     return this._ready;
   }
 
-  /** The configured mode (`"auto"` stays `"auto"`). */
+  /**
+   * The configured mode (`"auto"` stays `"auto"`). Read-only — switch modes
+   * with {@link Viewer.setMode}, whose promise settles with the transition.
+   */
   get mode(): ViewerMode {
     return this._mode;
   }
@@ -1670,7 +1792,7 @@ export class Viewer {
 
   /**
    * Reject a resolved mode the current dataset or target cannot host. Thrown
-   * BEFORE any engine teardown/rebuild, so a rejected assignment leaves the
+   * BEFORE any engine teardown/rebuild, so a rejected transition leaves the
    * running scene untouched.
    */
   private _assertModeSupported(mode: ResolvedViewerMode): void {
@@ -1679,28 +1801,44 @@ export class Viewer {
       throw new Error(
         `Mode "${mode}" is not supported by dataset kind "${this._dataset?.type}" ` +
         `(available: ${datasetModes.join(", ") || "none"}). ` +
-        "Check viewer.availableModes before assigning.",
+        "Check viewer.availableModes before transitioning.",
       );
     }
     if (!this._targetSupports(mode)) {
       throw new Error(
-        'viewer.mode = "quad" requires a container element (the Viewer lays out four ' +
+        'viewer.setMode("quad") requires a container element (the Viewer lays out four ' +
         "canvases); pass a container to createViewer instead of a canvas",
       );
     }
   }
 
   /**
-   * Switch visualization mode. Synchronous to call, asynchronous to complete
-   * — `await viewer.ready` observes completion. Transitions preserve the
-   * physical focus (the camera target survives; the new mode's fit framing is
-   * translated onto it) and channel intent (the channel model reapplies to
-   * the new mode's layers). Last-write-wins: rapid flips settle on the final
-   * mode. Assigning a mode the dataset or target cannot host throws before
-   * anything is torn down.
+   * Switch visualization mode and await the transition (DX-L2): the returned
+   * promise IS the operation. It resolves once the new mode's scene is
+   * rebuilt and its generated layers are structurally ready; it rejects with
+   * {@link ViewerSupersededError} when a newer open/transition wins
+   * (last-write-wins — rapid flips settle on the final mode), and with the
+   * recorded load error when a generated layer's source fails. Because the
+   * promise is the contract, fire-and-forget calls fail loudly (unhandled
+   * rejection) instead of silently — `viewer.ready` remains the
+   * swallow-guarded alternative for observing the latest operation.
+   *
+   * Transitions preserve the physical focus (the camera target survives; the
+   * new mode's fit framing is translated onto it) and channel intent (the
+   * channel model reapplies to the new mode's layers). `status`/`error`
+   * track the operation, and `viewer.config` mirrors the recorded intent.
+   *
+   * Preflight validation rejects BEFORE anything is torn down: an invalid
+   * mode name, a mode the dataset cannot build, or `"quad"` on a
+   * caller-owned canvas all leave the running scene (and the recorded mode
+   * intent) untouched. On an idle viewer (no dataset yet) the intent is only
+   * recorded — resolution and validation are deferred to `open()` — and the
+   * returned promise resolves immediately.
+   *
+   * `viewer.mode` is read-only; this method is the only transition path.
    */
-  set mode(value: ViewerMode) {
-    this._assertUsable("mode");
+  async setMode(value: ViewerMode): Promise<void> {
+    this._assertUsable("setMode");
     assertViewerMode(value);
     if (!this._dataset) {
       this._mode = value; // intent recorded; resolved + validated on open
@@ -1712,7 +1850,9 @@ export class Viewer {
     if (mode === this._pendingMode) return; // already the latest intent
     this._pendingMode = mode;
     const revision = ++this._revision;
-    this._track(this._rebuild(revision, mode, this._focus));
+    const op = this._rebuild(revision, mode, this._focus);
+    this._track(op);
+    await op;
   }
 
   // === Channels (DX-M3) ===
@@ -2569,12 +2709,29 @@ export class Viewer {
  * is open and ready; load failures reject with the actionable cause
  * (DX-M2 semantics). Without a dataset the viewer starts `idle` — call
  * `await viewer.open(config)`.
+ *
+ * Creation is transactional: when the initial open rejects, the never-returned
+ * viewer is destroyed first — viewer-owned DOM removed from the container, the
+ * engine's GPU device released, the opened dataset disposed — so a failed
+ * creation leaves nothing the caller cannot reach. The original error is
+ * rethrown unchanged; cleanup failures never mask it.
  */
 export async function createViewer(
   element : string | HTMLElement | HTMLCanvasElement,
   config  : ViewerConfig = {},
 ): Promise<Viewer> {
   const viewer = new Viewer(resolveTarget(element), config);
-  if (config.dataset) await viewer.open(config.dataset);
+  if (config.dataset) {
+    try {
+      await viewer.open(config.dataset);
+    } catch (err) {
+      try {
+        viewer.destroy();
+      } catch {
+        // The setup failure wins — cleanup noise is swallowed, never rethrown.
+      }
+      throw err;
+    }
+  }
   return viewer;
 }

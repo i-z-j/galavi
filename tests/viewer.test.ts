@@ -497,8 +497,7 @@ describe("channel model", () => {
     expect(layerOf(viewer, "volume-c1").render).toMatchObject({ visible: true, contrastLimits: [0.1, 0.4] });
 
     // Channel intent survives the mode transition onto the new slice layers.
-    viewer.mode = "slice";
-    await viewer.ready;
+    await viewer.setMode("slice");
     expect(layerOf(viewer, "slice-c1").render).toMatchObject({ visible: true, contrastLimits: [0.1, 0.4] });
     expect(layerOf(viewer, "slice-c0").render).toMatchObject({ visible: true, contrastLimits: [0, 1] });
   });
@@ -553,11 +552,9 @@ describe("projection", () => {
     const viewer = await makeViewer(makeFakeCanvas(), { dataset: DESC_3D });
     viewer.projection = "mean";
     expect(layerOf(viewer, "volume-c0").render?.volumeProjection).toBe("mean");
-    viewer.mode = "slice";
-    await viewer.ready;
+    await viewer.setMode("slice");
     expect(layerOf(viewer, "slice-c0").render?.volumeProjection).toBeUndefined();
-    viewer.mode = "volume";
-    await viewer.ready;
+    await viewer.setMode("volume");
     expect(layerOf(viewer, "volume-c0").render?.volumeProjection).toBe("mean");
     expect(() => { viewer.projection = "bogus" as never; }).toThrow(/Invalid projection/);
   });
@@ -572,42 +569,72 @@ describe("mode transitions", () => {
     const viewer = await makeViewer(makeFakeCanvas(), { dataset: DESC_3D }); // auto → volume
     viewer.engine!.setTarget([1, 2, 3]);
 
-    viewer.mode = "slice";
-    await viewer.ready;
+    await viewer.setMode("slice");
     expect(viewer.resolvedMode).toBe("slice");
     expect(viewer.engine!.getViewConfig("main")?.type).toBe("slice");
     expect(viewer.engine!.getState().exploration.camera.target).toEqual([1, 2, 3]);
 
-    viewer.mode = "volume";
-    await viewer.ready;
+    await viewer.setMode("volume");
     expect(viewer.resolvedMode).toBe("volume");
     expect(viewer.engine!.getState().exploration.camera.target).toEqual([1, 2, 3]);
   });
 
   test("rapid flips are last-write-wins and settle on the final mode", async () => {
     const viewer = await makeViewer(makeFakeCanvas(), { dataset: DESC_3D }); // volume
-    viewer.mode = "slice";
-    viewer.mode = "volume";
-    viewer.mode = "slice";
-    await viewer.ready;
+    const first = viewer.setMode("slice");
+    const second = viewer.setMode("volume");
+    const third = viewer.setMode("slice");
+    // The superseded transitions reject with ViewerSupersededError…
+    await expect(first).rejects.toBeInstanceOf(ViewerSupersededError);
+    await expect(second).rejects.toBeInstanceOf(ViewerSupersededError);
+    // …and the latest call wins, resolving once the final scene is ready.
+    await third;
     expect(viewer.resolvedMode).toBe("slice");
     expect(viewer.status).toBe("ready");
     expect(viewer.engine!.getViewConfig("main")?.type).toBe("slice");
     expect(layerOf(viewer, "slice-c0").type).toBe("slice");
+    await viewer.ready;
   });
 
-  test("mode set before open is applied at open", async () => {
+  test("setMode on an idle viewer records intent, applied at open", async () => {
     const viewer = await makeViewer();
-    viewer.mode = "slice";
+    await viewer.setMode("slice"); // resolves immediately — nothing to rebuild
+    expect(viewer.mode).toBe("slice");
     await viewer.open(DESC_3D);
     expect(viewer.resolvedMode).toBe("slice");
   });
 
-  test("an invalid mode throws synchronously", async () => {
+  test("setMode on an idle viewer defers validation to open", async () => {
+    const viewer = await makeViewer(); // idle, canvas target
+    await viewer.setMode("quad"); // intent recorded — not validated yet
+    expect(viewer.mode).toBe("quad");
+    await expect(viewer.open(DESC_3D)).rejects.toThrow(/quad.*requires a container element/);
+    expect(viewer.status).toBe("error");
+  });
+
+  test("setMode to the current mode is an immediate no-op", async () => {
+    const viewer = await makeViewer(makeFakeCanvas(), { dataset: DESC_3D }); // volume
+    const engine = viewer.engine;
+    await viewer.setMode("volume");
+    expect(viewer.engine).toBe(engine); // no rebuild
+    expect(viewer.status).toBe("ready");
+  });
+
+  test("an invalid mode rejects the transition", async () => {
     const viewer = await makeViewer(makeFakeCanvas(), { dataset: DESC_3D });
-    expect(() => { viewer.mode = "grid" as never; }).toThrow(/Invalid viewer mode/);
+    await expect(viewer.setMode("grid" as never)).rejects.toThrow(/Invalid viewer mode/);
   });
 });
+
+/**
+ * Compile-time probe (R5): plain assignment to `mode` must not compile — the
+ * getter is read-only by design. Never invoked (an invocation would throw).
+ */
+function assignModeProbe(viewer: Viewer): void {
+  // @ts-expect-error — mode is read-only; transitions are `await viewer.setMode(...)`
+  viewer.mode = "slice";
+}
+void assignModeProbe;
 
 // ============================================================================
 // MODE CAPABILITIES (dataset modes ∩ target support)
@@ -648,15 +675,15 @@ describe("mode capabilities", () => {
     );
   });
 
-  test("assigning an unsupported mode throws before any teardown", async () => {
+  test("an unsupported mode rejects before any teardown", async () => {
     const viewer = await makeViewer(makeFakeCanvas(), { dataset: DESC_2D });
     expect(viewer.resolvedMode).toBe("slice");
     const engine = viewer.engine;
 
-    expect(() => { viewer.mode = "volume"; }).toThrow(
+    await expect(viewer.setMode("volume")).rejects.toThrow(
       /Mode "volume" is not supported by dataset kind "viewer-stub" \(available: slice\)/,
     );
-    // The rejected assignment left the running scene (and the recorded mode
+    // The rejected transition left the running scene (and the recorded mode
     // intent) untouched.
     expect(viewer.engine).toBe(engine);
     expect(viewer.resolvedMode).toBe("slice");
@@ -670,7 +697,7 @@ describe("mode capabilities", () => {
     expect(viewer.availableModes).toEqual(["slice", "volume"]);
 
     const engine = viewer.engine;
-    expect(() => { viewer.mode = "quad"; }).toThrow(/quad.*requires a container element/);
+    await expect(viewer.setMode("quad")).rejects.toThrow(/quad.*requires a container element/);
     expect(viewer.engine).toBe(engine);
     expect(viewer.resolvedMode).toBe("volume");
     expect(viewer.status).toBe("ready");
@@ -695,13 +722,13 @@ describe("mode capabilities", () => {
     expect(viewer.engine!.getViewConfig("main")?.type).toBe("volume");
     expect(layerOf(viewer, "volume-mesh").type).toBe("surface");
 
-    // Slice/quad are not buildable for a mesh — rejected synchronously, and
-    // the running scene survives the rejected assignments.
+    // Slice/quad are not buildable for a mesh — rejected up front, and the
+    // running scene survives the rejected transitions.
     const engine = viewer.engine;
-    expect(() => { viewer.mode = "slice"; }).toThrow(
+    await expect(viewer.setMode("slice")).rejects.toThrow(
       /Mode "slice" is not supported by dataset kind "mesh" \(available: volume\)/,
     );
-    expect(() => { viewer.mode = "quad"; }).toThrow(/not supported by dataset kind "mesh"/);
+    await expect(viewer.setMode("quad")).rejects.toThrow(/not supported by dataset kind "mesh"/);
     expect(viewer.engine).toBe(engine);
     expect(viewer.resolvedMode).toBe("volume");
     expect(viewer.status).toBe("ready");
@@ -734,8 +761,7 @@ describe("slice navigation (setSlicePoint)", () => {
   test("entering slice mode with a preserved focus shows the slice at the focus", async () => {
     const viewer = await makeViewer(makeFakeCanvas(), { dataset: DESC_3D }); // auto → volume
     viewer.engine!.setTarget([1, 2, 6]);
-    viewer.mode = "slice";
-    await viewer.ready;
+    await viewer.setMode("slice");
     expect(layerOf(viewer, "slice-c0").options).toMatchObject({ sliceIndex: 3 });
     expect(viewer.engine!.getState().exploration.camera.target).toEqual([1, 2, 6]);
   });
@@ -772,16 +798,14 @@ describe("modeOverrides", () => {
     expect(viewer.engine!.getViewConfig("main")?.controls).toEqual({ panzoom: {} });
 
     // Volume: overrides applied on entry.
-    viewer.mode = "volume";
-    await viewer.ready;
+    await viewer.setMode("volume");
     expect(layerOf(viewer, "volume-c1").render).toMatchObject({ visible: true, contrastLimits: [0.1, 0.5] });
     expect(layerOf(viewer, "volume-c0").render).toMatchObject({ visible: true, contrastLimits: [0, 1] });
     expect(viewer.engine!.getViewConfig("main")?.overlays).toEqual({ crosshair: {} });
     expect(viewer.engine!.getViewConfig("main")?.controls).toEqual({ fly: {} });
 
     // Back to slice: base state again (overrides are per-mode, not sticky).
-    viewer.mode = "slice";
-    await viewer.ready;
+    await viewer.setMode("slice");
     expect(layerOf(viewer, "slice-c1").render).toMatchObject({ visible: false, contrastLimits: [0, 1] });
     expect(viewer.engine!.getViewConfig("main")?.overlays).toEqual({});
   });
@@ -790,8 +814,7 @@ describe("modeOverrides", () => {
     const viewer = await makeViewer(makeFakeCanvas(), { dataset: DESC_3D, mode: "slice" });
     viewer.view("volume").configure({ channels: [{ index: 0, contrast: [0.3, 0.7] }] });
 
-    viewer.mode = "volume";
-    await viewer.ready;
+    await viewer.setMode("volume");
     expect(layerOf(viewer, "volume-c0").render?.contrastLimits).toEqual([0.3, 0.7]);
 
     // Configuring the ACTIVE mode re-enters it immediately.
@@ -807,8 +830,7 @@ describe("modeOverrides", () => {
       modeOverrides: { volume: { camera: { target: [9, 9, 9] } } },
     });
     viewer.engine!.setTarget([1, 1, 1]);
-    viewer.mode = "volume";
-    await viewer.ready;
+    await viewer.setMode("volume");
     expect(viewer.engine!.getState().exploration.camera.target).toEqual([9, 9, 9]);
   });
 
@@ -847,8 +869,7 @@ describe("modeOverrides", () => {
 
     // Slice mode declares no transform: layers get the physical-space default
     // (plane-local scale for the x/y plane → diag(4, 4, 1, 1)).
-    viewer.mode = "slice";
-    await viewer.ready;
+    await viewer.setMode("slice");
     expect(layerOf(viewer, "slice-c0").data?.transform).toBeUndefined();
     for (const m of liveMatrices()) {
       expect(m).toEqual([4, 0, 0, 0, 0, 4, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
@@ -856,8 +877,7 @@ describe("modeOverrides", () => {
 
     // Back to volume: the rebuilt layers carry the affine again — the Viewer
     // owns re-application, no escape-hatch mutation needed.
-    viewer.mode = "volume";
-    await viewer.ready;
+    await viewer.setMode("volume");
     expect(layerOf(viewer, "volume-c0").data?.transform).toEqual(affine);
     for (const m of liveMatrices()) expect(m).toEqual(affine);
   });
@@ -924,8 +944,7 @@ describe("controls and tools runtime parity", () => {
     expect(controlTypes(viewer)).toEqual(["fly"]);
 
     // Declarative mirror stays in sync for rebuilds.
-    viewer.mode = "slice";
-    await viewer.ready;
+    await viewer.setMode("slice");
     expect(controlTypes(viewer)).toEqual(["fly"]);
 
     expect(() => viewer.control("warp" as never)).toThrow(/Unknown control/);
@@ -977,8 +996,7 @@ describe("controls and tools runtime parity", () => {
 
     // Tool intent survives mode transitions (rebuilt from the declarative mirror).
     viewer.tool("crosshair").enable();
-    viewer.mode = "volume";
-    await viewer.ready;
+    await viewer.setMode("volume");
     expect(viewer.engine!.getViewConfig("main")?.overlays).toMatchObject({
       crosshair: {},
       "magnifier-2d": {},
@@ -1123,8 +1141,7 @@ describe("escape hatch and teardown", () => {
     await viewer.open(DESC_3D);
     const first = viewer.engine;
     expect(first).toBeInstanceOf(ViewerEngine);
-    viewer.mode = "slice";
-    await viewer.ready;
+    await viewer.setMode("slice");
     expect(viewer.engine).toBeInstanceOf(ViewerEngine);
     expect(viewer.engine).not.toBe(first);
   });
@@ -1135,7 +1152,7 @@ describe("escape hatch and teardown", () => {
     expect(viewer.engine).toBeUndefined();
     expect(viewer.status).toBe("idle");
     await expect(viewer.open(DESC_3D)).rejects.toThrow(/destroyed/);
-    expect(() => { viewer.mode = "slice"; }).toThrow(/destroyed/);
+    await expect(viewer.setMode("slice")).rejects.toThrow(/destroyed/);
     viewer.destroy(); // idempotent
   });
 });
@@ -1163,8 +1180,7 @@ describe("theme, autoRotate, and channel compositing", () => {
       autoRotate: { speedDegPerSec: 8 },
     });
     expect(viewer.engine!.getViewConfig("main")?.autoRotate).toEqual({ speedDegPerSec: 8 });
-    viewer.mode = "slice";
-    await viewer.ready;
+    await viewer.setMode("slice");
     expect(viewer.engine!.getViewConfig("main")?.autoRotate).toBeUndefined();
   });
 
@@ -1180,8 +1196,7 @@ describe("theme, autoRotate, and channel compositing", () => {
     const viewer = await makeViewer(makeFakeCanvas(), { dataset: DESC_3D });
     expect(layerOf(viewer, "volume-c0").render?.blending).toBe("additive");
     expect(layerOf(viewer, "volume-c1").render?.blending).toBe("additive");
-    viewer.mode = "slice";
-    await viewer.ready;
+    await viewer.setMode("slice");
     expect(layerOf(viewer, "slice-c0").render?.blending).toBe("additive");
   });
 });

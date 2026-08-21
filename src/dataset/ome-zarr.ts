@@ -48,6 +48,7 @@ import {
   getDatasetCapabilities,
   type DatasetChannel,
   type DatasetConfig,
+  type DatasetConfigMap,
   type DefaultLayersOptions,
 } from "./base";
 
@@ -1330,6 +1331,34 @@ export async function openOMEZarrDataset(
   const dataset = new ImageDataset({ type: "ome-zarr", source: url }, options);
   await dataset.load();
   return dataset;
+}
+
+/**
+ * Named descriptor for the `"ome-zarr"` dataset kind — the declarative config
+ * for one OME-Zarr multiscale image, for `ViewerConfig.dataset` /
+ * `openDataset`:
+ *
+ * ```ts
+ * import { createViewer } from "galavi";
+ * import { omeZarr } from "galavi/ome-zarr";
+ * const viewer = await createViewer("#app", { dataset: omeZarr("https://server/image.ome.zarr") });
+ * ```
+ *
+ * The return is plain JSON — exactly `{ type: "ome-zarr", source }`, the
+ * `DatasetConfigMap["ome-zarr"]` member — so it round-trips through
+ * `JSON.parse(JSON.stringify(...))` unchanged and never carries runtime
+ * resources (the store opens later, inside `load()`).
+ *
+ * The helper lives on this subpath — not the root entry — because importing
+ * `galavi/ome-zarr` IS the loader registration: the module-scope
+ * `registerDataset` call below runs on import (the package's only declared
+ * side effect, which keeps the zarrita client out of the core bundle). The
+ * named import makes that loader identity explicit and discoverable from the
+ * `ViewerConfig.dataset` type instead of relying on a bare side-effect
+ * import.
+ */
+export function omeZarr(source: string): DatasetConfigMap["ome-zarr"] {
+  return { type: "ome-zarr", source };
 }
 
 registerDataset("ome-zarr", (config) => new ImageDataset(config));

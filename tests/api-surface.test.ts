@@ -96,6 +96,8 @@ const ROOT_VALUES = [
   "openDataset",
   "Dataset",
   "registerDataset",
+  // Dataset descriptor helper (the "mesh" kind is a core built-in)
+  "mesh",
   // Theme helpers
   "DEFAULT_THEME",
   "FUI_THEME",

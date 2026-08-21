@@ -27,11 +27,16 @@
  *      and asserts zarrita arrives transitively;
  *   5. asserts `import("galavi")`, `import("galavi/advanced")`, and
  *      `import("galavi/ome-zarr")` all resolve there — that the root does not
- *      re-export the moved engine names, and that the mesh/ome-zarr dataset
- *      registrations actually dispatch — and typechecks the consumer snippets
+ *      re-export the moved engine names, that the mesh/ome-zarr dataset
+ *      registrations actually dispatch, and that the `mesh`/`omeZarr`
+ *      descriptor helpers return JSON-stable configs that dispatch to the
+ *      right dataset classes (while an unregistered kind keeps its
+ *      actionable missing-registration error); a production vite build of a
+ *      consumer that imports ONLY `omeZarr` proves the registration side
+ *      effect survives tree-shaking — and typechecks the consumer snippets
  *      (north-star, root-only, advanced, cross-entry type identity, plate
- *      config flow, moved-name/JSON-only rejections) against the installed
- *      package (with the package's own TypeScript).
+ *      config flow, moved-name/JSON-only rejections, descriptor helpers)
+ *      against the installed package (with the package's own TypeScript).
  */
 import { execFileSync } from "node:child_process";
 import {
@@ -277,12 +282,120 @@ try {
       ' { type: "ome-zarr", source: "https://example.invalid/x.zarr" }]) {' +
       'try { await core.openDataset(config); }' +
       'catch (e) { if (/Unknown dataset kind/.test(String(e))) ' +
-      'throw new Error(`dataset registration missing for ${config.type}`); } }',
+      'throw new Error(`dataset registration missing for ${config.type}`); } }' +
+      // Named descriptor helpers (R4): both entries export them, the results
+      // are exactly `{ type, source }` (plain JSON, round-trip-stable)…
+      'if (typeof core.mesh !== "function") throw new Error("galavi root is missing the mesh() descriptor helper");' +
+      'if (typeof sub.omeZarr !== "function") throw new Error("galavi/ome-zarr is missing the omeZarr() descriptor helper");' +
+      'const meshConfig = core.mesh("https://example.invalid/m.obj");' +
+      'const zarrConfig = sub.omeZarr("https://example.invalid/x.zarr");' +
+      'if (JSON.stringify(meshConfig) !== \'{"type":"mesh","source":"https://example.invalid/m.obj"}\') ' +
+      'throw new Error("mesh() must return exactly { type, source }");' +
+      'if (JSON.stringify(zarrConfig) !== \'{"type":"ome-zarr","source":"https://example.invalid/x.zarr"}\') ' +
+      'throw new Error("omeZarr() must return exactly { type, source }");' +
+      'for (const cfg of [meshConfig, zarrConfig]) {' +
+      'if (JSON.stringify(JSON.parse(JSON.stringify(cfg))) !== JSON.stringify(cfg)) ' +
+      'throw new Error("descriptor helper result is not JSON-stable: " + JSON.stringify(cfg)); }' +
+      // …and each descriptor dispatches to its dataset class: mesh() must
+      // construct a MeshDataset (a stubbed fetch serves one OBJ triangle);
+      // omeZarr() must reach ImageDataset (its wrapped store-open failure
+      // names the format).
+      'globalThis.fetch = async () => new Response("v 0 0 0\\nv 1 0 0\\nv 0 1 0\\nf 1 2 3\\n", { status: 200 });' +
+      'const meshDataset = await core.openDataset(meshConfig);' +
+      'if (meshDataset.constructor.name !== "MeshDataset") ' +
+      'throw new Error("mesh() did not dispatch to MeshDataset, got " + meshDataset.constructor.name);' +
+      'globalThis.fetch = async () => new Response("not found", { status: 404 });' +
+      'try { await core.openDataset(zarrConfig); ' +
+      'throw new Error("ome-zarr open unexpectedly succeeded"); }' +
+      'catch (e) { if (!/Failed to open OME-Zarr dataset/.test(String(e))) ' +
+      'throw new Error("omeZarr() did not dispatch to ImageDataset: " + e); }',
     ],
     { cwd: app, stdio: "inherit" },
   );
 
-  // --- 5. Typecheck the consumer snippets against the installed package ---
+  // --- 5. Missing registration keeps its actionable error (manual/third-party configs) ---
+  execFileSync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "-e",
+      // Root entry only — the ome-zarr kind is NOT registered here.
+      'const core = await import("galavi");' +
+      'try {' +
+      'await core.openDataset({ type: "ome-zarr", source: "https://example.invalid/x.zarr" });' +
+      'throw new Error("open unexpectedly succeeded");' +
+      '} catch (e) {' +
+      'if (!/Unknown dataset kind: "ome-zarr".*import "galavi\\/ome-zarr"/.test(String(e))) ' +
+      'throw new Error("missing-registration error lost its import hint: " + e);' +
+      '}',
+    ],
+    { cwd: app, stdio: "inherit" },
+  );
+
+  // --- 6. Production tree-shaking: importing only omeZarr keeps the registration ---
+  // A consumer bundler may include galavi/ome-zarr solely for the omeZarr
+  // descriptor helper; the module's registerDataset("ome-zarr") side effect
+  // must survive production tree-shaking (the sideEffects declaration covers
+  // exactly that bundle).
+  const VITE = join(PACKAGE_ROOT, "node_modules", "vite", "bin", "vite.js");
+  if (!existsSync(VITE)) fail(`vite not found at ${VITE} — run bun install first`);
+  const treeshakeEntry = join(app, "treeshake-entry.mjs");
+  const treeshakeOut = join(app, "treeshake-dist");
+  writeFileSync(treeshakeEntry, `
+import { omeZarr } from "galavi/ome-zarr";
+import { openDataset } from "galavi";
+
+export const outcome = (async () => {
+  try {
+    await openDataset(omeZarr("https://example.invalid/x.ome.zarr"));
+    return "opened-unexpectedly";
+  } catch (error) {
+    // Any failure EXCEPT a missing registration proves the loader dispatched.
+    return /Unknown dataset kind/.test(String(error)) ? "registration-lost" : "dispatched";
+  }
+})();
+`);
+  writeFileSync(join(app, "vite.treeshake.config.mjs"), `
+export default {
+  logLevel: "silent",
+  build: {
+    target: "es2022",
+    minify: true,
+    lib: {
+      entry: ${JSON.stringify(treeshakeEntry)},
+      formats: ["es"],
+      fileName: () => "treeshake.mjs",
+    },
+    outDir: ${JSON.stringify(treeshakeOut)},
+    emptyOutDir: true,
+  },
+};
+`);
+  execFileSync(
+    process.execPath,
+    [VITE, "build", "--config", join(app, "vite.treeshake.config.mjs")],
+    { cwd: app, stdio: "inherit" },
+  );
+  const treeshakeBundle = join(treeshakeOut, "treeshake.mjs");
+  if (!existsSync(treeshakeBundle)) fail("tree-shaking probe bundle was not emitted");
+  execFileSync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "-e",
+      'const mod = await import(process.env.TREESHAKE_BUNDLE);' +
+      'const outcome = await mod.outcome;' +
+      'if (outcome !== "dispatched") throw new Error(' +
+      '"ome-zarr registration did not survive production tree-shaking: " + outcome);',
+    ],
+    {
+      cwd: app,
+      stdio: "inherit",
+      env: { ...process.env, TREESHAKE_BUNDLE: treeshakeBundle },
+    },
+  );
+
+  // --- 7. Typecheck the consumer snippets against the installed package ---
   const snippet = join(app, "north-star.ts");
   writeFileSync(snippet, `
 import { createViewer, type DatasetConfig } from "galavi";
@@ -291,7 +404,8 @@ import "galavi/ome-zarr";
 const viewer = await createViewer("#app", {
   dataset: { type: "ome-zarr", source: "https://example.test/image.ome.zarr" },
 });
-viewer.mode = "slice";
+// Mode transitions are awaitable operations (R5) — no property assignment.
+await viewer.setMode("slice");
 
 // High-level ROI events (review §9.5): typed payloads, unsubscribe function,
 // never a callback inside the JSON-only ViewerConfig.
@@ -386,6 +500,9 @@ void badTools;
 declare const viewer: import("galavi").Viewer;
 // @ts-expect-error — the imperative tool path is equally JSON-only (API-4)
 viewer.tool("roi").configure({ onActiveIndexChange: () => {} });
+
+// @ts-expect-error — mode is read-only; transitions are await viewer.setMode(...) (R5)
+viewer.mode = "slice";
 `);
   // Single type identity across entries: the Viewer's engine (typed from the
   // root entry) must be directly assignable to the ViewerEngine imported from
@@ -436,8 +553,49 @@ const rebuilt: PlateField = {
 };
 void [rebuilt, openOMEZarrPlate];
 `);
+  // The named descriptor helpers (R4): exact DatasetConfigMap members,
+  // droppable into ViewerConfig.dataset, with required-string source and no
+  // extra/runtime values.
+  const helpers = join(app, "helpers.ts");
+  writeFileSync(helpers, `
+import { createViewer, mesh, type DatasetConfig } from "galavi";
+import { omeZarr } from "galavi/ome-zarr";
+
+const zarrDescriptor = omeZarr("https://example.test/image.ome.zarr");
+const meshDescriptor = mesh("https://example.test/mesh.obj");
+
+// The helper results are exactly the DatasetConfigMap members — assignable
+// both to the shared DatasetConfig union and to the exact member shape.
+const asConfigs: DatasetConfig[] = [zarrDescriptor, meshDescriptor];
+void asConfigs;
+const exactZarr: { type: "ome-zarr"; source: string } = zarrDescriptor;
+const exactMesh: { type: "mesh"; source: string } = meshDescriptor;
+void [exactZarr, exactMesh];
+
+// Straight into ViewerConfig.dataset — the target first-use form.
+const viewer = await createViewer("#app", {
+  dataset: omeZarr("https://example.test/image.ome.zarr"),
+});
+void viewer;
+
+// @ts-expect-error — source is required
+omeZarr();
+
+// @ts-expect-error — source must be a string
+omeZarr(42);
+
+// @ts-expect-error — source must be a string
+mesh(null);
+
+// @ts-expect-error — descriptor helpers take no extra/runtime options
+omeZarr("https://example.test/x.zarr", { fetch: () => {} });
+
+// @ts-expect-error — extra/runtime fields are not part of the descriptor
+const withRuntime: DatasetConfig = { type: "ome-zarr", source: "https://example.test/x", fetch: () => {} };
+void withRuntime;
+`);
   if (!existsSync(TSC)) fail(`TypeScript not found at ${TSC} — run bun install first`);
-  for (const file of [snippet, rootOnly, advancedSnippet, rejections, identity, plate]) {
+  for (const file of [snippet, rootOnly, advancedSnippet, rejections, identity, plate, helpers]) {
     execFileSync(
       process.execPath,
       [
@@ -455,6 +613,7 @@ void [rebuilt, openOMEZarrPlate];
     "zarrita as a transitive runtime dependency, resolvable root + advanced + ome-zarr entries " +
     "(root/advanced side-effect-free, registration only in galavi/ome-zarr), " +
     "single-identity declarations shared across entries, " +
+    "mesh/omeZarr descriptor helpers (tree-shaking-safe registration), " +
     "and consumer-side typed dataset configs",
   );
 } finally {

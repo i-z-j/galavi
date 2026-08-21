@@ -25,6 +25,7 @@ export {
   createViewerEngine,
 } from "./viewer";
 export type {
+  CreateViewerEngineOptions,
   LayerPatch,
 } from "./viewer";
 

@@ -38,14 +38,14 @@ Two imports, one call — a complete viewer against an OME-Zarr store:
 
 ```ts
 import { createViewer } from "galavi";
-import "galavi/ome-zarr"; // registers the "ome-zarr" dataset kind
+import { omeZarr } from "galavi/ome-zarr";
 
 const viewer = await createViewer("#app", {
-  dataset: { type: "ome-zarr", source: "https://server/data.zarr" },
+  dataset: omeZarr("https://server/data.zarr"),
 });
 ```
 
-Every config key has an imperative equivalent: `viewer.mode = "volume"`,
+Every config key has an imperative equivalent: `await viewer.setMode("volume")`,
 `viewer.projection = "mip"`, `viewer.channel(1).configure({ contrast: [0.02, 0.2] })`,
 `viewer.tool("ruler").enable()`, `await viewer.open(dataset)`.
 
