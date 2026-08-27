@@ -1,10 +1,10 @@
 {
   "name": "galavi",
   "version": "2026.8.1",
-  "description": "Scientific data visualization library based on WebGPU",
+  "description": "Dataset-to-Viewer infrastructure for scientific WebGPU viewers: a declarative Dataset boundary, an application-facing Viewer boundary, and the reusable rendering infrastructure between them",
   "keywords": ["webgpu", "visualization", "ome-zarr", "scientific", "3d", "microscopy"],
   "author": "Zi-Jian Yi (伊子健) <arrowzeke@gmail.com>",
-  "license": "GPL-3.0",
+  "license": "Apache-2.0",
   "homepage": "https://github.com/i-z-j/galavi",
   "bugs": {
     "url": "https://github.com/i-z-j/galavi/issues"
@@ -20,12 +20,8 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/galavi.js"
     },
-    "./advanced": {
-      "types": "./dist/advanced.d.ts",
-      "import": "./dist/advanced.js"
-    },
     "./ome-zarr": {
-      "types": "./dist/dataset/ome-zarr.d.ts",
+      "types": "./dist/dataset/adapters/ome-zarr.d.ts",
       "import": "./dist/ome-zarr.js"
     }
   },
@@ -40,6 +36,7 @@
     "build": "vite build",
     "test": "vitest run",
     "test:pack": "node scripts/check-pack.mjs",
+    "deps": "madge --extensions ts --ts-config tsconfig.json --circular src",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
     "prepublishOnly": "bun run typecheck && bun run test && bun run build"
   },
@@ -51,6 +48,7 @@
     "@webgpu/types": "^0.1.65",
     "bun-types": "^1.2.22",
     "jsdom": "^29.1.1",
+    "madge": "^8.0.0",
     "typescript": "^5.5.3",
     "vite": "^5.4.1",
     "vite-plugin-dts": "^4.5.0",

@@ -8,7 +8,7 @@
  * value, letting callers fall back with `?? default`.
  */
 
-import type { Vec2, Vec3 } from "../types";
+import type { Vec2, Vec3 } from "../state/schema";
 
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);

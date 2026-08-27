@@ -9,7 +9,7 @@ export {
   cameraAngles,
   computePosition,
   computeForward,
-} from "./spherical";
+} from "./math/spherical";
 
 // Fit-to-data camera helpers
 export {
@@ -17,21 +17,21 @@ export {
   fitSliceCamera,
   type FrameVolumeCameraOptions,
   type FitSliceCameraOptions,
-} from "./camera-fit";
+} from "./math/camera-fit";
 
 // Shared axis helpers
 export {
   resolveAxes,
   type AxisIndex,
   type AxisMap,
-} from "./axes";
+} from "./math/axes";
 
 // Shared geometry constants
 export {
   EMPTY_VERTEX_BUFFER,
   UNIT_CUBE,
   aabbFromPositions,
-} from "./geometry";
+} from "./render/geometry";
 
 // Colormaps and appearance presets
 export {
@@ -42,42 +42,17 @@ export {
   parseHexColor,
   type ColormapName,
   type AppearancePresetId,
-} from "./colormaps";
+} from "./render/colormaps";
 
-// Tile streaming system
+// Tile streaming system moved to `viewer/tile/` (rendering-runtime
+// substrate) — re-exported from the ROOT entry, not here: utils may not
+// import viewer code. The pure encoding helpers stay on this barrel via
+// `./render`.
+export { floatToFloat16 } from "./render/float16";
 export {
-  TilePool,
-  TileLoadQueue,
-  TileManager,
-  tileId,
-  buildTileFetcher,
-  floatToFloat16,
   dtypeNormalization,
   makeFloat16Encoder,
-  sourceChanged,
-  resolveDataUrl,
-  pickPyramidLevel,
-  countPyramidLevelTiles,
-  planTiles,
-  planVolumePreview,
-  VOLUME_PREVIEW_MAX_SLABS,
-  VOLUME_PREVIEW_MAX_TILES,
-  VOLUME_PREVIEW_MAX_CHUNK_TEXELS,
-  VOLUME_PREVIEW_POOL_HEADROOM,
-  type VolumePreviewPlan,
-  type TilePoolConfig,
-  type TileCoord,
-  type TileSource,
-  type TileSpec,
-  type TileFramePlan,
-  type TilePlacement,
-  type TilePlan,
-  type TileLoader,
-  type TileCommitResult,
-  type TileBounds,
-  type TileViewport,
-  type PyramidLevelSelection,
-} from "./tile";
+} from "./render/pack";
 
 // Input normalization
 export {
@@ -110,14 +85,7 @@ export {
   cross,
   dot,
   normalize,
-} from "./projection";
+} from "./render/projection";
 
-// Channel colors and contrast limits
-export {
-  CHANNEL_FALLBACK_COLORS,
-  CONTRAST_RANGE,
-  normalizeHexColor,
-  getChannelColor,
-  clampContrastLimits,
-  buildContrastLimits,
-} from "./channels";
+// Channel colors and contrast limits live in the dataset contract
+// (src/dataset/contract.ts) — re-exported from the dataset barrel.

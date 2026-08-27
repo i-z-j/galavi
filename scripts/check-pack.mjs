@@ -1,42 +1,47 @@
 /**
- * Pack + isolated-install smoke (API-1/API-2/API-4/API-6): the published npm
- * artifact must be self-installing and keep the package boundary:
+ * Pack + isolated-install smoke: the published npm artifact must be
+ * self-installing and keep the package boundary:
  *
- *   galavi             -> the common Viewer entry (side-effect-free)
- *   galavi/advanced    -> the low-level authoring entry (side-effect-free)
+ *   galavi             -> the ONE main entry: facade + state + dataset +
+ *                         composition + runtime + primitives + utils
+ *                         (side-effect-free)
  *   galavi/ome-zarr    -> zarrita (runtime dependency, external to the bundle)
  *                         + the ONLY entry with a module-load side effect
  *                         (its dataset self-registration)
+ *
+ * State transport is plain JSON (`JSON.stringify`/`JSON.parse`);
+ * `validateState`/`normalizeState` are root-entry exports.
  *
  * `npm install galavi` alone must satisfy the north-star snippet — zarrita is
  * a regular dependency, not a peer. This script therefore:
  *
  *   1. rebuilds (`bun run build`);
  *   2. packs the tarball and checks its file list, exports map, dependency
- *      metadata (zarrita in `dependencies`, no peer declarations), and the
- *      narrowed `sideEffects` declaration;
- *   3. verifies the import graph (no core path may reach zarrita) and the
- *      bundles (zarrita-free root + advanced entries; no top-level dataset
- *      registration outside dist/ome-zarr.js; the OME-Zarr entry imports
- *      zarrita as an external, keeps its registration call, and its
+ *      metadata (wgpu-matrix + zarrita in `dependencies`, no peer
+ *      declarations), and the narrowed `sideEffects` declaration;
+ *   3. verifies the import graph (no core path may reach zarrita; nothing may
+ *      reach fflate) and the bundles (zarrita-free root entry; no top-level
+ *      dataset registration outside dist/ome-zarr.js; the OME-Zarr entry
+ *      imports zarrita as an external, keeps its registration call, and its
  *      declarations carry the `DatasetConfigMap` augmentation). Declarations
  *      are NOT rolled up: dist mirrors src/ so every type has ONE identity
- *      across all three entries (advanced/ome-zarr re-export the shared
+ *      across the entries (ome-zarr re-exports or references the shared
  *      declaration files instead of re-declaring them);
  *   4. installs ONLY the tarball into a temp project outside the workspace
  *      and asserts zarrita arrives transitively;
- *   5. asserts `import("galavi")`, `import("galavi/advanced")`, and
- *      `import("galavi/ome-zarr")` all resolve there — that the root does not
- *      re-export the moved engine names, that the mesh/ome-zarr dataset
- *      registrations actually dispatch, and that the `mesh`/`omeZarr`
+ *   5. asserts `import("galavi")` and `import("galavi/ome-zarr")` resolve
+ *      there, that the root carries the low-level runtime surface (runtime,
+ *      primitives, utils), that the mesh/ome-zarr dataset registrations
+ *      actually dispatch, that `validateState` accepts a portable State and
+ *      rejects function-backed values, and that the `mesh`/`omeZarr`
  *      descriptor helpers return JSON-stable configs that dispatch to the
  *      right dataset classes (while an unregistered kind keeps its
  *      actionable missing-registration error); a production vite build of a
  *      consumer that imports ONLY `omeZarr` proves the registration side
  *      effect survives tree-shaking — and typechecks the consumer snippets
- *      (north-star, root-only, advanced, cross-entry type identity, plate
- *      config flow, moved-name/JSON-only rejections, descriptor helpers)
- *      against the installed package (with the package's own TypeScript).
+ *      (north-star, root-only, low-level surface, JSON-only rejections,
+ *      descriptor helpers, state schema) against the installed package
+ *      (with the package's own TypeScript).
  */
 import { execFileSync } from "node:child_process";
 import {
@@ -61,17 +66,19 @@ const EXPECTED_FILES = [
   "package/dist/galavi.js",
   "package/dist/galavi.js.map",
   "package/dist/index.d.ts",
-  "package/dist/advanced.js",
-  "package/dist/advanced.js.map",
-  "package/dist/advanced.d.ts",
   "package/dist/ome-zarr.js",
   "package/dist/ome-zarr.js.map",
   // Declarations mirror src/ (no rollup): the ome-zarr entry's types live at
-  // their source path, and viewer/base are the SHARED declaration modules the
-  // other entries reference (single identity per type across entries).
-  "package/dist/dataset/ome-zarr.d.ts",
-  "package/dist/dataset/base.d.ts",
-  "package/dist/viewer.d.ts",
+  // their source path (dist/dataset/adapters/), the scene vocabulary/
+  // validation lives in dist/state/, and the viewer/dataset declaration
+  // modules are the SHARED modules the other entry references (single
+  // identity per type across entries).
+  "package/dist/dataset/adapters/ome-zarr.d.ts",
+  "package/dist/dataset/contract.d.ts",
+  "package/dist/dataset/index.d.ts",
+  "package/dist/state/schema.d.ts",
+  "package/dist/viewer/index.d.ts",
+  "package/dist/viewer/contract.d.ts",
 ];
 
 function fail(message) {
@@ -84,28 +91,26 @@ function checkBundles(root) {
   const core = readFileSync(join(root, "dist/galavi.js"), "utf8");
   if (core.includes("zarrita")) fail(`${root}/dist/galavi.js references zarrita — core import graph is not clean`);
   if (core.includes("sourceRegistry")) fail(`${root}/dist/galavi.js still references sourceRegistry`);
+  if (core.includes("fflate")) fail(`${root}/dist/galavi.js references fflate — JSON is the transport`);
   const coreTypes = readFileSync(join(root, "dist/index.d.ts"), "utf8");
   if (coreTypes.includes("zarrita")) fail(`${root}/dist/index.d.ts references zarrita`);
   if (coreTypes.includes("sourceRegistry")) fail(`${root}/dist/index.d.ts still references sourceRegistry`);
-  const advanced = readFileSync(join(root, "dist/advanced.js"), "utf8");
-  if (advanced.includes("zarrita")) fail(`${root}/dist/advanced.js references zarrita`);
-  const advancedTypes = readFileSync(join(root, "dist/advanced.d.ts"), "utf8");
-  if (advancedTypes.includes("zarrita")) fail(`${root}/dist/advanced.d.ts references zarrita`);
-  // Single identity per type across entries: the advanced entry must
-  // RE-EXPORT the shared declarations, never re-declare them (a rolled-up
-  // per-entry d.ts gives e.g. ViewerEngine a distinct nominal identity per
-  // entry, breaking cross-entry assignability for consumers).
-  if (/declare class ViewerEngine/.test(advancedTypes)) {
-    fail(`${root}/dist/advanced.d.ts re-declares ViewerEngine — it must re-export ./viewer (no d.ts rollup)`);
+  if (coreTypes.includes("fflate")) fail(`${root}/dist/index.d.ts references fflate`);
+  // Single identity per type across entries: the root entry must RE-EXPORT
+  // the shared declarations, never re-declare them (a rolled-up per-entry
+  // d.ts gives e.g. ViewerRuntime a distinct nominal identity per entry,
+  // breaking cross-entry assignability for consumers).
+  if (/declare class ViewerRuntime/.test(coreTypes)) {
+    fail(`${root}/dist/index.d.ts re-declares ViewerRuntime — it must re-export ./viewer (no d.ts rollup)`);
   }
-  if (!/export\s*\{[^}]*\bViewerEngine\b[^}]*\}\s*from\s*["']\.\/viewer["']/.test(advancedTypes)) {
-    fail(`${root}/dist/advanced.d.ts does not re-export ViewerEngine from "./viewer"`);
+  if (!/export\s*\{[^}]*\bViewerRuntime\b[^}]*\}\s*from\s*["']\.\/viewer["']/.test(coreTypes)) {
+    fail(`${root}/dist/index.d.ts does not re-export ViewerRuntime from "./viewer"`);
   }
-  // Side-effect discipline (API-6): package.json `sideEffects` covers ONLY
-  // the OME-Zarr registration entry, so no other bundle may execute a dataset
+  // Side-effect discipline: package.json `sideEffects` covers ONLY the
+  // OME-Zarr registration entry, so no other bundle may execute a dataset
   // registration at module scope — a bundler is allowed to drop it there.
-  for (const [name, code] of [["dist/galavi.js", core], ["dist/advanced.js", advanced]]) {
-    if (/registerDataset\s*\(\s*["']/.test(code)) {
+  for (const [name, code] of [["dist/galavi.js", core]]) {
+    if (/registerDatasetAdapter\s*\(\s*["']/.test(code)) {
       fail(
         `${root}/${name} registers a dataset at module scope — only dist/ome-zarr.js ` +
         "may carry that side effect (see the sideEffects declaration)",
@@ -116,31 +121,31 @@ function checkBundles(root) {
   if (!/from\s*["']zarrita["']/.test(subpath)) {
     fail(`${root}/dist/ome-zarr.js does not import zarrita as an external — was it bundled or tree-shaken away?`);
   }
-  if (!/registerDataset\s*\(\s*["']ome-zarr["']/.test(subpath)) {
+  if (!/registerDatasetAdapter\s*\(\s*["']ome-zarr["']/.test(subpath)) {
     fail(
-      `${root}/dist/ome-zarr.js lost its module-scope registerDataset("ome-zarr") call — ` +
+      `${root}/dist/ome-zarr.js lost its module-scope registerDatasetAdapter("ome-zarr") call — ` +
       "the registration side effect must survive bundling",
     );
   }
-  const subpathTypes = readFileSync(join(root, "dist/dataset/ome-zarr.d.ts"), "utf8");
-  if (!/^declare module "\.\/base"/m.test(subpathTypes)) {
+  const subpathTypes = readFileSync(join(root, "dist/dataset/adapters/ome-zarr.d.ts"), "utf8");
+  if (!/^declare module "\.\.\/\.\.\/state\/schema"/m.test(subpathTypes)) {
     fail(
-      `${root}/dist/dataset/ome-zarr.d.ts lost the DatasetConfigMap augmentation ` +
+      `${root}/dist/dataset/adapters/ome-zarr.d.ts lost the DatasetConfigMap augmentation ` +
       '(consumers would not get the typed "ome-zarr" config) — it must survive ' +
-      'declaration emission verbatim as declare module "./base"',
+      'declaration emission verbatim as declare module "../../state/schema"',
     );
   }
   // The augmentation must merge with the ONE shared DatasetConfigMap
-  // declaration: the subpath must reference the root declarations (via
-  // ./base), never carry its own rolled-up copy of the config union.
-  if (/declare (type|interface) DatasetConfig(Map)?\b/.test(subpathTypes.replace(/declare module "\.\/base"[\s\S]*?\n\}/, ""))) {
+  // declaration: the subpath must reference the shared declarations (via
+  // ../../state/schema), never carry its own rolled-up copy of the config union.
+  if (/declare (type|interface) DatasetConfig(Map)?\b/.test(subpathTypes.replace(/declare module "\.\.\/\.\.\/state\/schema"[\s\S]*?\n\}/, ""))) {
     fail(
-      `${root}/dist/dataset/ome-zarr.d.ts re-declares DatasetConfig/DatasetConfigMap outside ` +
+      `${root}/dist/dataset/adapters/ome-zarr.d.ts re-declares DatasetConfig/DatasetConfigMap outside ` +
       "the augmentation — PlateField.source would use an un-augmented mesh-only union",
     );
   }
-  if (!/from\s*["']\.\/base["']/.test(subpathTypes)) {
-    fail(`${root}/dist/dataset/ome-zarr.d.ts does not reference the shared ./base declarations`);
+  if (!/from\s*["']\.\.\/contract["']/.test(subpathTypes)) {
+    fail(`${root}/dist/dataset/adapters/ome-zarr.d.ts does not reference the shared ../contract declarations`);
   }
 }
 
@@ -150,17 +155,18 @@ execFileSync("bun", ["run", "build"], { cwd: PACKAGE_ROOT, stdio: "inherit" });
 for (const file of [
   "dist/galavi.js",
   "dist/index.d.ts",
-  "dist/advanced.js",
-  "dist/advanced.d.ts",
   "dist/ome-zarr.js",
-  "dist/dataset/ome-zarr.d.ts",
+  "dist/dataset/adapters/ome-zarr.d.ts",
+  "dist/state/schema.d.ts",
 ]) {
   if (!existsSync(join(PACKAGE_ROOT, file))) fail(`${file} missing right after build`);
 }
 
-// --- 1. Source import graph: zarrita is imported only by src/dataset/ome-zarr.ts ---
+// --- 1. Source import graph: zarrita is imported only by src/dataset/adapters/ome-zarr.ts,
+//        and fflate is imported NOWHERE (JSON is the transport) ---
 {
   const zarritaImport = /(?:from\s*["']zarrita["']|import\(\s*["']zarrita["'])/;
+  const fflateImport = /(?:from\s*["']fflate["']|import\(\s*["']fflate["'])/;
   const stack = [join(PACKAGE_ROOT, "src")];
   while (stack.length > 0) {
     const dir = stack.pop();
@@ -171,9 +177,11 @@ for (const file of [
         continue;
       }
       if (!entry.name.endsWith(".ts")) continue;
-      if (path === join(PACKAGE_ROOT, "src", "dataset", "ome-zarr.ts")) continue;
-      if (zarritaImport.test(readFileSync(path, "utf8"))) {
-        fail(`${path} imports zarrita — only src/dataset/ome-zarr.ts may do that`);
+      if (path !== join(PACKAGE_ROOT, "src", "dataset", "adapters", "ome-zarr.ts") && zarritaImport.test(readFileSync(path, "utf8"))) {
+        fail(`${path} imports zarrita — only src/dataset/adapters/ome-zarr.ts may do that`);
+      }
+      if (fflateImport.test(readFileSync(path, "utf8"))) {
+        fail(`${path} imports fflate — JSON is the transport`);
       }
     }
   }
@@ -212,8 +220,6 @@ try {
     ["types", manifest.types],
     ["exports['.'].types", manifest.exports?.["."]?.types],
     ["exports['.'].import", manifest.exports?.["."]?.import],
-    ["exports['./advanced'].types", manifest.exports?.["./advanced"]?.types],
-    ["exports['./advanced'].import", manifest.exports?.["./advanced"]?.import],
     ["exports['./ome-zarr'].types", manifest.exports?.["./ome-zarr"]?.types],
     ["exports['./ome-zarr'].import", manifest.exports?.["./ome-zarr"]?.import],
   ];
@@ -223,7 +229,7 @@ try {
     if (!listing.includes(entry)) fail(`${field} points at ${target}, absent from tarball`);
   }
 
-  // Side effects (API-6): narrowed to exactly the OME-Zarr registration entry.
+  // Side effects: narrowed to exactly the OME-Zarr registration entry.
   const sideEffects = manifest.sideEffects;
   if (!Array.isArray(sideEffects) || sideEffects.join(",") !== "./dist/ome-zarr.js") {
     fail(`sideEffects must be exactly ["./dist/ome-zarr.js"], got: ${JSON.stringify(sideEffects)}`);
@@ -236,7 +242,7 @@ try {
     fail(`runtime dependencies must be exactly ["wgpu-matrix", "zarrita"], got: ${JSON.stringify(runtimeDeps)}`);
   }
   if (manifest.peerDependencies || manifest.peerDependenciesMeta) {
-    fail("no peerDependencies/peerDependenciesMeta may remain — zarrita is a regular dependency now");
+    fail("no peerDependencies/peerDependenciesMeta may remain — zarrita is a regular dependency");
   }
 
   // --- 3. Isolated install: ONLY the tarball, in a temp project outside the workspace ---
@@ -259,7 +265,7 @@ try {
   // The installed artifact keeps the bundle boundary too.
   checkBundles(join(app, "node_modules", "galavi"));
 
-  // --- 4. All three entry points resolve and evaluate in the isolated project ---
+  // --- 4. Both entry points resolve and evaluate in the isolated project ---
   execFileSync(
     process.execPath,
     [
@@ -267,13 +273,43 @@ try {
       "-e",
       'const core = await import("galavi");' +
       'if (typeof core.createViewer !== "function") throw new Error("galavi root entry broken");' +
-      'if ("ViewerEngine" in core || "createViewerEngine" in core) ' +
-      'throw new Error("galavi root still exports the engine — it moved to galavi/advanced (API-6)");' +
-      'const advanced = await import("galavi/advanced");' +
-      'if (typeof advanced.createViewerEngine !== "function") throw new Error("galavi/advanced entry broken");' +
-      'if (typeof advanced.createViewer !== "function") throw new Error("galavi/advanced must re-export the common root");' +
+      // The root entry also carries the low-level runtime surface:
+      // runtime, registries, primitives, utils.
+      'if (typeof core.createViewerRuntime !== "function" || typeof core.ViewerRuntime !== "function") ' +
+      'throw new Error("galavi root is missing the low-level runtime surface (ViewerRuntime/createViewerRuntime)");' +
+      'if (typeof core.registerLayer !== "function" || typeof core.registerView !== "function" ||' +
+      ' typeof core.registerControl !== "function" || typeof core.registerOverlay !== "function") ' +
+      'throw new Error("galavi root is missing the registry helpers");' +
+      'if (typeof core.BaseLayer !== "function" || typeof core.BaseView !== "function" ||' +
+      ' typeof core.BaseControl !== "function" || typeof core.BaseOverlay !== "function") ' +
+      'throw new Error("galavi root is missing the primitive base classes");' +
+      'if (typeof core.TilePool !== "function" || typeof core.planTiles !== "function") ' +
+      'throw new Error("galavi root is missing the tile utilities");' +
+      'if (typeof core.registerComposition !== "function") ' +
+      'throw new Error("galavi root is missing registerComposition (the composition extension point)");' +
+      'if ("getDatasetCapabilities" in core) ' +
+      'throw new Error("compositions own support — there is no dataset capability API");' +
       'const sub = await import("galavi/ome-zarr");' +
       'if (typeof sub.openOMEZarr !== "function") throw new Error("galavi/ome-zarr entry broken");' +
+      'if (typeof sub.OMEZarrDataset !== "function") throw new Error("galavi/ome-zarr is missing OMEZarrDataset");' +
+      // State transport is plain JSON: the schema surface (validateState /
+      // normalizeState) is a root-level export.
+      'if (typeof core.validateState !== "function" || typeof core.normalizeState !== "function") ' +
+      'throw new Error("galavi root is missing validateState/normalizeState");' +
+      'const probeState = {' +
+      ' layers: [{ id: "volume-c0", type: "volume", data: { url: "https://example.invalid/x.zarr" } }],' +
+      ' exploration: { camera: { navMode: "fly", projMode: "orthographic", position: [2, 2, 12], target: [2, 2, 4] } },' +
+      ' composition: { type: "volume" },' +
+      ' channels: [{ index: 0, label: "DAPI µm 通道", visible: true, color: "#00B0FF", contrast: [0.1, 0.9] }],' +
+      ' projection: "mip",' +
+      '};' +
+      'const validated = core.validateState(JSON.parse(JSON.stringify(probeState)));' +
+      'if (JSON.stringify(validated) !== JSON.stringify(probeState)) ' +
+      'throw new Error("validateState JSON round trip mismatch: " + JSON.stringify(validated));' +
+      'let fnRejected = false;' +
+      'try { core.validateState({ layers: [{ id: "l", type: "volume", data: { fetch: async () => new ArrayBuffer(0) } }], exploration: probeState.exploration }); }' +
+      'catch (e) { fnRejected = /is a function/.test(String(e)); }' +
+      'if (!fnRejected) throw new Error("validateState must reject function-backed values, not drop them");' +
       // Registration side effects, functionally: both the lazy built-in
       // ("mesh", no module-load side effect) and the ome-zarr entry's
       // import-time registration must dispatch — a missing registration
@@ -283,8 +319,8 @@ try {
       'try { await core.openDataset(config); }' +
       'catch (e) { if (/Unknown dataset kind/.test(String(e))) ' +
       'throw new Error(`dataset registration missing for ${config.type}`); } }' +
-      // Named descriptor helpers (R4): both entries export them, the results
-      // are exactly `{ type, source }` (plain JSON, round-trip-stable)…
+      // Named descriptor helpers: both entries export them, the results are
+      // exactly `{ type, source }` (plain JSON, round-trip-stable)…
       'if (typeof core.mesh !== "function") throw new Error("galavi root is missing the mesh() descriptor helper");' +
       'if (typeof sub.omeZarr !== "function") throw new Error("galavi/ome-zarr is missing the omeZarr() descriptor helper");' +
       'const meshConfig = core.mesh("https://example.invalid/m.obj");' +
@@ -298,7 +334,7 @@ try {
       'throw new Error("descriptor helper result is not JSON-stable: " + JSON.stringify(cfg)); }' +
       // …and each descriptor dispatches to its dataset class: mesh() must
       // construct a MeshDataset (a stubbed fetch serves one OBJ triangle);
-      // omeZarr() must reach ImageDataset (its wrapped store-open failure
+      // omeZarr() must reach OMEZarrDataset (its wrapped store-open failure
       // names the format).
       'globalThis.fetch = async () => new Response("v 0 0 0\\nv 1 0 0\\nv 0 1 0\\nf 1 2 3\\n", { status: 200 });' +
       'const meshDataset = await core.openDataset(meshConfig);' +
@@ -308,7 +344,7 @@ try {
       'try { await core.openDataset(zarrConfig); ' +
       'throw new Error("ome-zarr open unexpectedly succeeded"); }' +
       'catch (e) { if (!/Failed to open OME-Zarr dataset/.test(String(e))) ' +
-      'throw new Error("omeZarr() did not dispatch to ImageDataset: " + e); }',
+      'throw new Error("omeZarr() did not dispatch to OMEZarrDataset: " + e); }',
     ],
     { cwd: app, stdio: "inherit" },
   );
@@ -334,7 +370,7 @@ try {
 
   // --- 6. Production tree-shaking: importing only omeZarr keeps the registration ---
   // A consumer bundler may include galavi/ome-zarr solely for the omeZarr
-  // descriptor helper; the module's registerDataset("ome-zarr") side effect
+  // descriptor helper; the module's registerDatasetAdapter("ome-zarr") side effect
   // must survive production tree-shaking (the sideEffects declaration covers
   // exactly that bundle).
   const VITE = join(PACKAGE_ROOT, "node_modules", "vite", "bin", "vite.js");
@@ -350,7 +386,7 @@ export const outcome = (async () => {
     await openDataset(omeZarr("https://example.invalid/x.ome.zarr"));
     return "opened-unexpectedly";
   } catch (error) {
-    // Any failure EXCEPT a missing registration proves the loader dispatched.
+    // Any failure EXCEPT a missing registration proves the kind dispatched.
     return /Unknown dataset kind/.test(String(error)) ? "registration-lost" : "dispatched";
   }
 })();
@@ -404,25 +440,21 @@ import "galavi/ome-zarr";
 const viewer = await createViewer("#app", {
   dataset: { type: "ome-zarr", source: "https://example.test/image.ome.zarr" },
 });
-// Mode transitions are awaitable operations (R5) — no property assignment.
-await viewer.setMode("slice");
+// Composition transitions are awaitable operations — no property assignment.
+await viewer.setComposition({ type: "slice" });
 
-// High-level ROI events (review §9.5): typed payloads, unsubscribe function,
+// High-level ROI events: typed payloads, unsubscribe function,
 // never a callback inside the JSON-only ViewerConfig.
-const stop = viewer.on("roiChange", ({ rois, change, viewId, mode }) => {
-  void [rois, change, viewId, mode];
+const stop = viewer.on("roiChange", ({ rois, change, viewId, composition }) => {
+  void [rois, change, viewId, composition];
 });
-viewer.on("roiActiveChange", ({ activeIndex, viewId, mode }) => {
-  void [activeIndex, viewId, mode];
+viewer.on("roiActiveChange", ({ activeIndex, viewId, composition }) => {
+  void [activeIndex, viewId, composition];
 });
 stop();
 
 const mesh: DatasetConfig = { type: "mesh", source: "https://example.test/mesh.obj" };
 void mesh;
-
-// @ts-expect-error — "image" was the old OME-Zarr key; it is not a loader identity
-const stale: DatasetConfig = { type: "image", source: "https://example.test/x" };
-void stale;
 
 // @ts-expect-error — the field is \`source\`; \`url\` is not a config field
 const wrongField: DatasetConfig = { type: "ome-zarr", url: "https://example.test/x" };
@@ -444,19 +476,21 @@ void mesh;
 const zarr: DatasetConfig = { type: "ome-zarr", source: "https://example.test/x" };
 void zarr;
 `);
-  // The advanced entry carries the low-level authoring surface (API-6),
-  // including the callback-bearing overlay options (API-4).
-  const advancedSnippet = join(app, "advanced.ts");
-  writeFileSync(advancedSnippet, `
+  // The root entry also carries the low-level authoring surface, including
+  // the callback-bearing overlay options the JSON-only facade config excludes.
+  const lowLevelSnippet = join(app, "low-level.ts");
+  writeFileSync(lowLevelSnippet, `
 import {
   createViewer,
-  createViewerEngine,
+  createViewerRuntime,
+  type CompositionPlan,
   type LayerConfig,
   type LayerPatch,
   type RoiSelectorOverlayOptions,
   type State,
   type ViewConfig,
-} from "galavi/advanced";
+  type ViewerComposition,
+} from "galavi";
 
 const layers: LayerConfig[] = [];
 const state: State = {
@@ -472,7 +506,13 @@ const state: State = {
 };
 const views: Record<string, ViewConfig> = {};
 const patch: LayerPatch = { id: "layer", render: { visible: true } };
-void [state, views, patch, createViewer, createViewerEngine];
+void [state, views, patch, createViewer, createViewerRuntime];
+
+// The composition contract: the plan + composition types resolve from the
+// root entry.
+const plan: CompositionPlan | null = null;
+const composition: ViewerComposition | null = null;
+void [plan, composition];
 
 const roiOptions: RoiSelectorOverlayOptions = {
   onRoisChange: (rois, change) => { void rois; void change; },
@@ -480,53 +520,56 @@ const roiOptions: RoiSelectorOverlayOptions = {
 };
 void roiOptions;
 `);
-  // The intentional breaks (API-4 + API-6) must hold at the consumer boundary.
+  // The JSON-purity and entry-shape assertions must hold at the consumer
+  // boundary.
   const rejections = join(app, "rejections.ts");
   writeFileSync(rejections, `
 import { createViewer, type ViewerConfig } from "galavi";
 void createViewer;
 
-// @ts-expect-error — the engine moved to galavi/advanced; no root alias (API-6)
-import { createViewerEngine } from "galavi";
-void createViewerEngine;
+import { createViewerRuntime } from "galavi";
+void createViewerRuntime;
 
-// @ts-expect-error — the raw scene model moved to galavi/advanced (API-6)
+// The unified State is the root's portable document (facade + runtime).
 import { type State } from "galavi";
+const rootState: State | null = null;
+void rootState;
 
-// @ts-expect-error — high-level tool config is JSON-only (API-4)
+// @ts-expect-error — high-level tool config is JSON-only
 const badTools: ViewerConfig = { tools: { roi: { onRoisChange: () => {} } } };
 void badTools;
 
 declare const viewer: import("galavi").Viewer;
-// @ts-expect-error — the imperative tool path is equally JSON-only (API-4)
+// @ts-expect-error — the imperative tool path is equally JSON-only
 viewer.tool("roi").configure({ onActiveIndexChange: () => {} });
 
-// @ts-expect-error — mode is read-only; transitions are await viewer.setMode(...) (R5)
-viewer.mode = "slice";
+// @ts-expect-error — getState()/setState() use the unified State; there is no ViewerState type
+type StaleViewerState = import("galavi").ViewerState;
+void (0 as unknown as StaleViewerState | undefined);
 `);
-  // Single type identity across entries: the Viewer's engine (typed from the
-  // root entry) must be directly assignable to the ViewerEngine imported from
-  // galavi/advanced — no NonNullable<Viewer["engine"]> workarounds.
+  // Single type identity across entries: the Viewer's runtime (typed from
+  // the root entry) must be directly assignable to the ViewerRuntime
+  // imported from the same root entry — no NonNullable<Viewer["runtime"]>
+  // workarounds.
   const identity = join(app, "identity.ts");
   writeFileSync(identity, `
-import { createViewer, type Viewer } from "galavi";
-import { createViewerEngine, type ViewerEngine } from "galavi/advanced";
+import { createViewer, createViewerRuntime, type Viewer, type ViewerRuntime } from "galavi";
 
 const viewer = await createViewer("#app", {
   dataset: { type: "mesh", source: "https://example.test/mesh.obj" },
 });
 
-// One nominal identity: Viewer["engine"] IS the advanced entry's ViewerEngine.
-const engine: ViewerEngine | undefined = viewer.engine;
-void engine;
+// One nominal identity: Viewer["runtime"] IS the root entry's ViewerRuntime.
+const runtime: ViewerRuntime | undefined = viewer.runtime;
+void runtime;
 
-function takeEngine(value: ViewerEngine | undefined): void { void value; }
-takeEngine(viewer.engine);
+function takeRuntime(value: ViewerRuntime | undefined): void { void value; }
+takeRuntime(viewer.runtime);
 
 // And the reverse direction, through the class itself.
-declare const anyEngine: ViewerEngine;
-const asRootShape: NonNullable<Viewer["engine"]> = anyEngine;
-void [asRootShape, createViewerEngine];
+declare const anyRuntime: ViewerRuntime;
+const asRootShape: NonNullable<Viewer["runtime"]> = anyRuntime;
+void [asRootShape, createViewerRuntime];
 `);
   // The plate helpers carry the AUGMENTED DatasetConfig union: a field's
   // config opens directly, and an ome-zarr config literal is accepted
@@ -553,8 +596,8 @@ const rebuilt: PlateField = {
 };
 void [rebuilt, openOMEZarrPlate];
 `);
-  // The named descriptor helpers (R4): exact DatasetConfigMap members,
-  // droppable into ViewerConfig.dataset, with required-string source and no
+  // The named descriptor helpers: exact DatasetConfigMap members, droppable
+  // into ViewerConfig.dataset, with required-string source and no
   // extra/runtime values.
   const helpers = join(app, "helpers.ts");
   writeFileSync(helpers, `
@@ -594,8 +637,58 @@ omeZarr("https://example.test/x.zarr", { fetch: () => {} });
 const withRuntime: DatasetConfig = { type: "ome-zarr", source: "https://example.test/x", fetch: () => {} };
 void withRuntime;
 `);
+  // The state schema surface (validateState / normalizeState + the portable
+  // reference vocabulary) lives on the root entry; transport is plain JSON.
+  const stateSnippet = join(app, "state-schema.ts");
+  writeFileSync(stateSnippet, `
+import {
+  createViewer,
+  normalizeState,
+  validateState,
+  type ChannelState,
+  type CompositionReference,
+  type JsonObject,
+  type JsonValue,
+  type State,
+} from "galavi";
+
+const camera: State["exploration"]["camera"] = {
+  navMode: "orbit", projMode: "perspective", position: [0, 0, 1], target: [0, 0, 0],
+};
+const channel: ChannelState = { index: 0, label: "a", visible: true, color: "#00B0FF", contrast: [0, 1] };
+const composition: CompositionReference = { type: "volume" };
+const config: JsonObject = { stride: 2 };
+const withConfig: CompositionReference = { ...composition, config };
+void withConfig;
+const json: JsonValue = { label: "µm", values: [0, 1] };
+void json;
+
+const viewer = await createViewer("#app", {
+  dataset: { type: "mesh", source: "https://example.test/mesh.obj" },
+});
+// The portable state loop over the ONE unified State: snapshot -> JSON -> restore.
+const snapshot: State = viewer.getState();
+await viewer.setState(JSON.parse(JSON.stringify(snapshot)) as State);
+const stop = viewer.subscribe((next: State) => { void next; });
+stop();
+
+// The scene-document surface: a portable State validates and normalizes;
+// JSON round-trips are the transport.
+const state = validateState({
+  layers: [{ id: "l", type: "volume", data: { url: "https://example.test/x" } }],
+  exploration: { camera },
+  channels: [channel],
+  composition,
+  projection: "mip",
+});
+const normalized = normalizeState(JSON.parse(JSON.stringify(state)));
+void normalized;
+
+// @ts-expect-error — getState()/setState() are the state surface; there is no viewer.config
+viewer.config;
+`);
   if (!existsSync(TSC)) fail(`TypeScript not found at ${TSC} — run bun install first`);
-  for (const file of [snippet, rootOnly, advancedSnippet, rejections, identity, plate, helpers]) {
+  for (const file of [snippet, rootOnly, lowLevelSnippet, rejections, identity, plate, helpers, stateSnippet]) {
     execFileSync(
       process.execPath,
       [
@@ -610,11 +703,12 @@ void withRuntime;
 
   console.log(
     `pack check OK: ${filename} carries ${EXPECTED_FILES.length} expected files, a consistent exports map, ` +
-    "zarrita as a transitive runtime dependency, resolvable root + advanced + ome-zarr entries " +
-    "(root/advanced side-effect-free, registration only in galavi/ome-zarr), " +
+    "zarrita as a transitive runtime dependency, resolvable root + ome-zarr entries " +
+    "(root side-effect-free, registration only in galavi/ome-zarr, " +
+    "the state schema surface on the root entry with JSON as the transport), " +
     "single-identity declarations shared across entries, " +
     "mesh/omeZarr descriptor helpers (tree-shaking-safe registration), " +
-    "and consumer-side typed dataset configs",
+    "and consumer-side typed dataset configs + portable viewer state",
   );
 } finally {
   rmSync(dir, { recursive: true, force: true });

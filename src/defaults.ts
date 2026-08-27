@@ -6,7 +6,7 @@ import type {
   Exploration,
   State,
   Vec3,
-} from "./types";
+} from "./state/schema";
 
 // ============================================================================
 // CONTROL SENSITIVITIES

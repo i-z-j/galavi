@@ -1,15 +1,17 @@
 # Galavi
 
-Galavi is a WebGPU visualization library for shared-state scientific viewers. It renders volume, slice, surface, shape, and related data types through one state model and a small set of pluggable building blocks.
+Galavi connects a declarative Dataset boundary to an application-facing Viewer boundary — two peers whose contracts live at `dataset/contract.ts` and `viewer/contract.ts`. Dataset adapters (`dataset/adapters/`) and Viewer compositions (`viewer/compositions/`, which also owns composition registration and resolution) implement those contracts; ViewerRuntime, views, layers, controls, overlays, streaming, LOD, and GPU residency are the reusable infrastructure between them. Built on WebGPU, it renders volume, slice, surface, shape, and related data types through one state model and a small set of pluggable building blocks.
 
 ![Galavi](assets/screenshot.webp)
 
 ## Features
 
-- **High-level `Viewer` API** — `createViewer(element, config)` gives you a complete scientific viewer in one call: dataset session, modes, channels, camera fit, controls/tools, and loading status from a single JSON-serializable `ViewerConfig`.
-- **`openDataset` dataset-kind registry** — format-neutral dataset contract (physical space, normalized channels, mode capabilities; image datasets also expose the pyramid/fetch pair layers consume); kinds self-register via `registerDataset` with typed configs (`"ome-zarr"` comes from the `galavi/ome-zarr` subpath, `"mesh"` is built in).
+- **High-level `Viewer` API** — `createViewer(element, config)` gives you a complete scientific viewer in one call: dataset session, compositions, channels, camera fit, controls/tools, and loading status from a single JSON-serializable `ViewerConfig`.
+- **`openDataset` dataset-adapter registry** — format-neutral dataset contract (physical space, normalized channels, typed runtime **resources** such as an image pyramid/fetch pair or mesh geometry; compositions, not datasets, translate resources into scenes); adapters self-register via `registerDatasetAdapter` with typed configs (`"ome-zarr"` comes from the `galavi/ome-zarr` subpath, `"mesh"` is built in), or pass a direct one-off adapter to `openDataset(config, { adapter })`.
 - WebGPU-native rendering for multi-view scientific scenes.
-- Shared, serializable `State` model — physical space, layers, exploration — diffable across view layouts.
+- **Portable `State`** — `viewer.getState()` snapshots the complete reproducible session (dataset descriptor, resolved composition, channels, projection, the live camera, tool/ROI state) as pure JSON; `await viewer.setState(state)` restores it atomically and `viewer.subscribe(listener)` reports committed snapshots. Transport is plain `JSON.stringify`/`JSON.parse` — nothing is silently dropped: function-backed values reject.
+- **Compositions** — how a dataset + state become a scene: built-in `slice`, `volume`, `quad`, and `grid` (a paged slice pool) register through the same `registerComposition` mechanism as custom ones; pass a direct implementation for one-off customization (`composition: { implementation }`).
+- Shared runtime `State` model — physical space, layers, exploration — diffable across view layouts; JSON-portable only while every layer's `data` is declarative.
 - Tile-based multi-resolution loading for large OME-Zarr and similar pyramidal datasets, with an automatic bounded volume tile-budget policy.
 - Built-in views: `volume` (3D perspective), `slice` (2D ortho), `navigator` (3D overview).
 - Built-in controls: `orbit`, `fly`, `panzoom` — pure reducers, view-local.
@@ -45,16 +47,24 @@ const viewer = await createViewer("#app", {
 });
 ```
 
-Every config key has an imperative equivalent: `await viewer.setMode("volume")`,
+Every config key has an imperative equivalent: `await viewer.setComposition("volume")`,
 `viewer.projection = "mip"`, `viewer.channel(1).configure({ contrast: [0.02, 0.2] })`,
 `viewer.tool("ruler").enable()`, `await viewer.open(dataset)`.
 
-Use the low-level **`createViewerEngine`** API from `galavi/advanced` instead
-when you need what the Viewer does not own: arbitrary multi-view composition,
-custom registered layers/controls/overlays/views, non-image layers, or
-explicit scene-`State` serialization. `viewer.engine` is the escape hatch for
-one-off advanced operations. See [DESIGN.md](./DESIGN.md) for the layering and
-ownership model.
+Snapshot, share, and restore the whole session as one portable document:
+
+```ts
+const snapshot = viewer.getState();                        // → pure JSON document
+const shared = JSON.stringify(snapshot);                   // transport is app-owned
+await viewer.setState(JSON.parse(shared));                 // atomic restore
+```
+
+Use the low-level **`createViewerRuntime`** API (same root entry) when you need
+what the Viewer does not own: arbitrary multi-view scenes, custom registered
+layers/controls/overlays/views, or non-image layers. `viewer.runtime` is the
+escape hatch for one-off advanced operations. See the
+[design notes](https://i-z-j.github.io/galavi-docs/guide/design) for the
+layering and ownership model.
 
 ## References
 
@@ -64,4 +74,5 @@ ownership model.
 
 ## License
 
-GPL-3.0
+Apache-2.0 (previously GPL-3.0 — infrastructure intended for embedding needs a
+permissive license with an explicit patent grant).

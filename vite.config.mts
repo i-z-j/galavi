@@ -6,11 +6,11 @@ export default defineConfig({
     dts({
       include: ["src/**/*"],
       // No type rollup: emitted declarations mirror src/ and cross-reference
-      // each other, so every type has ONE identity across the root, advanced,
-      // and ome-zarr entries (rolled-up per-entry bundles each re-declared the
+      // each other, so every type has ONE identity across the root and
+      // ome-zarr entries (rolled-up per-entry bundles each re-declared the
       // shared classes/interfaces, splitting their nominal identity). This
       // also preserves the `declare module "galavi"` DatasetConfigMap
-      // augmentation in dist/dataset/ome-zarr.d.ts verbatim.
+      // augmentation in dist/dataset/adapters/ome-zarr.d.ts verbatim.
       rollupTypes: false,
     }),
   ],
@@ -21,8 +21,7 @@ export default defineConfig({
     lib: {
       entry: {
         index: "src/index.ts",
-        advanced: "src/advanced.ts",
-        "ome-zarr": "src/dataset/ome-zarr.ts",
+        "ome-zarr": "src/dataset/adapters/ome-zarr.ts",
       },
       formats: ["es"],
       fileName: (_format, entryName) =>

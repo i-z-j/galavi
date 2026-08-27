@@ -1,235 +1,192 @@
 /**
- * Registry<T, F> — Generic factory registry
+ * Registry<T, F> — pure capability registration + lookup.
  *
- * Holds built-in + custom factories keyed by type string. `F` is the factory
- * signature so `create()` is type-safe via `Parameters<F>`.
+ * Holds factories keyed by type string. This module is deliberately free of
+ * concrete capability imports (type-only imports of the contract bases
+ * below): the singletons start EMPTY and are filled by the idempotent
+ * `ensureBuiltIn*()` bootstrap in each owning folder barrel
+ * (`src/primitives/layer/index.ts`, `src/primitives/view/index.ts`,
+ * `src/primitives/control/index.ts`, `src/primitives/overlay/index.ts`,
+ * `src/dataset/index.ts`), invoked at the resolution boundaries
+ * (`createViewerRuntime`, `openDataset`). The one documented exception is the
+ * `galavi/ome-zarr` subpath, which self-registers on import.
+ *
+ * There is no `create()` — callers `resolve(type)` and invoke the factory
+ * themselves, so instantiation never happens inside the registry.
  */
 
-import type { LayerConfig } from "./types";
-import type { Dataset, DatasetConfig, DatasetConfigMap } from "./dataset/base";
-import { MeshDataset } from "./dataset/mesh";
-import {
-  BaseLayer,
-  VolumeLayer,
-  SliceLayer,
-  SurfaceLayer,
-  ShapesLayer,
-  PointsLayer,
-  SegmentationLayer,
-  VectorsLayer,
-  TracksLayer,
-  NetworkLayer,
-  type LayerClass,
-} from "./layer";
-import {
-  BaseControl,
-  FlyControl,
-  OrbitControl,
-  PanZoomControl,
-  type ControlClass,
-} from "./control";
-import {
-  BaseOverlay,
-  CrosshairOverlay,
-  RulerOverlay,
-  RoiSelectorOverlay,
-  MagnifierOverlay,
-  FoldablePanelOverlay,
-  type OverlayClass,
-} from "./overlay";
-import {
-  BaseView,
-  VolumeView,
-  SliceView,
-  NavigatorView,
-  type ViewClass,
-} from "./view";
+import type { LayerConfig } from "./state/schema";
+import type {
+  Dataset,
+  DatasetAdapter,
+  DatasetConfigMap,
+} from "./dataset/contract";
+import type { BaseLayer } from "./primitives/layer/base";
+import type { BaseControl } from "./primitives/control/base";
+import type { BaseOverlay } from "./primitives/overlay/base";
+import type { BaseView } from "./primitives/view/base";
+
+// ============================================================================
+// ERRORS
+// ============================================================================
+
+/**
+ * A resolution-boundary miss: a capability reference (dataset kind, layer
+ * type, view type, control type, overlay type, …) names no registered
+ * implementation. The message names the kind, the type key, the registered
+ * alternatives, and — when known — the fix (e.g. the subpath import that
+ * provides the capability).
+ */
+export class CapabilityResolutionError extends Error {
+  /** The capability kind, e.g. `"dataset kind"`, `"layer type"`. */
+  readonly kind: string;
+  /** The unresolved type key. */
+  readonly type: string;
+  /** The registered type keys at resolution time. */
+  readonly available: readonly string[];
+  /** Actionable fix, when known (e.g. `Did you mean to import "galavi/ome-zarr"?`). */
+  readonly hint?: string;
+
+  constructor(init: {
+    kind      : string;
+    type      : string;
+    available : readonly string[];
+    hint?     : string;
+  }) {
+    super(
+      `Unknown ${init.kind}: "${init.type}" (registered: ${init.available.join(", ") || "none"}).` +
+      (init.hint ? ` ${init.hint}` : ""),
+    );
+    this.name = "CapabilityResolutionError";
+    this.kind = init.kind;
+    this.type = init.type;
+    this.available = [...init.available];
+    if (init.hint !== undefined) this.hint = init.hint;
+  }
+}
 
 // ============================================================================
 // GENERIC REGISTRY CLASS
 // ============================================================================
 
 export class Registry<T, F extends (...args: any[]) => T> {
-  private factories?: Map<string, F>;
-  private readonly buildBuiltins: () => Record<string, F>;
-  private readonly duplicateError?: (type: string) => Error;
+  private readonly factories = new Map<string, F>();
+  /** Capability kind label used in error messages (e.g. `"dataset kind"`). */
+  private readonly kind: string;
 
-  /**
-   * Built-ins are lazy. The thunk runs on first access so concrete classes
-   * (which import from this module's siblings) finish initializing first —
-   * registry.ts sits at the top of the import cycle.
-   *
-   * `duplicateError`, when set, makes `register` reject an already-registered
-   * key instead of silently overriding it (used by the dataset registry,
-   * where a duplicate key means two loaders are fighting over one identity).
-   */
-  constructor(
-    buildBuiltins: () => Record<string, F>,
-    duplicateError?: (type: string) => Error,
-  ) {
-    this.buildBuiltins = buildBuiltins;
-    this.duplicateError = duplicateError;
+  constructor(kind: string) {
+    this.kind = kind;
   }
 
-  private getFactories(): Map<string, F> {
-    if (!this.factories) {
-      this.factories = new Map(Object.entries(this.buildBuiltins()));
+  /**
+   * Register a factory. A capability key is an identity: re-registering an
+   * existing key throws, naming the conflicting key — tests and plugins
+   * register unique keys (and unregister them again in teardown). Returns an
+   * unregister function for the registration.
+   */
+  register(type: string, factory: F): () => void {
+    if (this.factories.has(type)) {
+      throw new Error(
+        `Duplicate ${this.kind} registration: "${type}" is already registered. ` +
+        "Capability keys are unique — choose a distinct key " +
+        "(tests: unregister the key again in teardown).",
+      );
     }
-    return this.factories;
+    this.factories.set(type, factory);
+    return () => { this.unregister(type); };
   }
 
   /**
-   * Register a custom factory. Overrides an existing key unless the registry
-   * was constructed with a `duplicateError` (then a duplicate throws).
+   * Resolve the factory for a type; the caller invokes it. A miss throws
+   * {@link CapabilityResolutionError} naming the kind, the key, and the
+   * registered alternatives.
    */
-  register(type: string, factory: F): void {
-    const factories = this.getFactories();
-    if (this.duplicateError && factories.has(type)) throw this.duplicateError(type);
-    factories.set(type, factory);
-  }
-
-  /** Create an instance. Throws if type is unknown. */
-  create(type: string, ...args: Parameters<F>): T {
-    const factory = this.getFactories().get(type);
-    if (!factory) throw new Error(`Unknown type: "${type}"`);
-    return factory(...args);
+  resolve(type: string): F {
+    const factory = this.factories.get(type);
+    if (!factory) {
+      throw new CapabilityResolutionError({
+        kind      : this.kind,
+        type,
+        available : this.keys(),
+      });
+    }
+    return factory;
   }
 
   /** Check if a type is registered */
   has(type: string): boolean {
-    return this.getFactories().has(type);
+    return this.factories.has(type);
   }
 
-  /** Enumerate registered type keys (built-ins + custom). */
+  /** Enumerate registered type keys. */
   keys(): string[] {
-    return [...this.getFactories().keys()];
+    return [...this.factories.keys()];
   }
 
   /** Remove a registration. Returns true if a key was removed. */
   unregister(type: string): boolean {
-    return this.getFactories().delete(type);
+    return this.factories.delete(type);
   }
 }
 
 // ============================================================================
-// BUILT-IN REGISTRIES
+// CAPABILITY REGISTRIES (start empty — see the module header)
 // ============================================================================
 
-/**
- * Build a `{ type: factory }` map from a list of self-registering classes.
- * `builder(cls)` decides how to turn a class into a factory — either a static
- * method binding (e.g. `cls.fromConfig.bind(cls)`) or a constructor wrapper
- * (`(...a) => new cls(...a)`).
- */
-function fromClasses<F extends (...args: any[]) => unknown>(
-  classes : readonly Record<string, any>[],
-  typeKey : string,
-  builder : (cls: any) => F,
-): Record<string, F> {
-  const out: Record<string, F> = {};
-  for (const cls of classes) out[cls[typeKey] as string] = builder(cls);
-  return out;
-}
+export type LayerFactory   = (id: string, desc: LayerConfig) => BaseLayer;
+export type ControlFactory = (id: string, options?: Record<string, unknown>) => BaseControl;
+export type OverlayFactory = () => BaseOverlay;
+export type ViewFactory    = (id: string) => BaseView;
 
-type LayerFactory   = (id: string, desc: LayerConfig) => BaseLayer;
-type ControlFactory = (id: string, options?: Record<string, unknown>) => BaseControl;
-type OverlayFactory = () => BaseOverlay;
-type ViewFactory    = (id: string) => BaseView;
-
-// NOTE: getters (not top-level `const` arrays) so the class identifiers are
-// resolved lazily, after every sibling module has finished initializing.
-// `view/runtime/factory.ts` imports from this module, so eager evaluation here
-// hits a TDZ on `VolumeView` etc. when the cycle closes.
-const getLayerClasses   = (): readonly LayerClass[]   => [
-  VolumeLayer, SliceLayer, SurfaceLayer, ShapesLayer, PointsLayer,
-  SegmentationLayer, VectorsLayer, TracksLayer, NetworkLayer,
-];
-const getControlClasses = (): readonly ControlClass[] => [
-  OrbitControl, FlyControl, PanZoomControl,
-];
-const getOverlayClasses = (): readonly OverlayClass[] => [
-  CrosshairOverlay, RulerOverlay, RoiSelectorOverlay, FoldablePanelOverlay,
-];
-const getViewClasses    = (): readonly ViewClass[]    => [
-  VolumeView, SliceView, NavigatorView,
-];
-
-export const layerRegistry   = new Registry<BaseLayer, LayerFactory>(() =>
-  fromClasses<LayerFactory>(getLayerClasses(), "layerType", (cls) => cls.fromConfig.bind(cls)),
-);
-export const controlRegistry = new Registry<BaseControl, ControlFactory>(() =>
-  fromClasses<ControlFactory>(getControlClasses(), "controlType", (cls) => cls.create.bind(cls)),
-);
-export const overlayRegistry = new Registry<BaseOverlay, OverlayFactory>(() => ({
-  ...fromClasses<OverlayFactory>(getOverlayClasses(), "overlayType", (cls) => () => new cls()),
-  // Separate tool entries over one implementation parameterized by dimension.
-  "magnifier-2d" : () => new MagnifierOverlay("2d"),
-  "magnifier-3d" : () => new MagnifierOverlay("3d"),
-}));
-export const viewRegistry    = new Registry<BaseView, ViewFactory>(() =>
-  fromClasses<ViewFactory>(getViewClasses(), "viewType", (cls) => (id) => new cls(id)),
-);
-
-/** DatasetFactory — constructs a Dataset from its declarative config. */
-export type DatasetFactory = (config: DatasetConfig) => Dataset;
+export const layerRegistry   = new Registry<BaseLayer, LayerFactory>("layer type");
+export const controlRegistry = new Registry<BaseControl, ControlFactory>("control type");
+export const overlayRegistry = new Registry<BaseOverlay, OverlayFactory>("overlay type");
+export const viewRegistry    = new Registry<BaseView, ViewFactory>("view type");
 
 /**
- * Dataset kinds register here. The built-in `"mesh"` loader is a LAZY
- * built-in (resolved on first registry access, like every other registry
- * above) so the core entry stays free of module-load side effects — only the
- * `galavi/ome-zarr` subpath registers on import, by design (API-6). Kind
- * modules otherwise never get imported by this module.
- *
- * A dataset kind key is a loader identity: re-registering an existing key
- * throws (naming the key) instead of silently replacing the loader — tests
- * and plugins register unique keys (and `unregister` afterwards).
+ * Dataset kinds register here. A dataset kind key is a loader identity:
+ * re-registering an existing key throws (naming the key) instead of silently
+ * replacing the loader — tests and plugins register unique keys (and
+ * `unregister` afterwards). The built-in `"mesh"` kind is registered by
+ * `ensureBuiltInDatasets()` (src/dataset/index.ts); only the
+ * `galavi/ome-zarr` subpath registers on import, by design.
  */
-export const datasetRegistry = new Registry<Dataset, DatasetFactory>(
-  // The thunk runs on first access, so the MeshDataset binding resolves
-  // after every sibling module has finished initializing.
-  () => ({
-    mesh: (config) => new MeshDataset(config),
-  }),
-  (kind) => new Error(
-    `Duplicate dataset kind registration: "${kind}" is already registered. ` +
-    "Dataset loader keys are unique — choose a distinct key " +
-    "(tests: unregister the key again in teardown).",
-  ),
-);
+export const datasetRegistry = new Registry<Dataset, DatasetAdapter>("dataset kind");
 
 // ============================================================================
 // CUSTOM REGISTRATION HELPERS (for advanced 3rd-party developers)
 // ============================================================================
 
-/** Register a custom layer type */
-export function registerLayer(type: string, factory: LayerFactory): void {
-  layerRegistry.register(type, factory);
+/** Register a custom layer type. Returns an unregister function. */
+export function registerLayer(type: string, factory: LayerFactory): () => void {
+  return layerRegistry.register(type, factory);
 }
 
-/** Register a custom control type */
-export function registerControl(type: string, factory: ControlFactory): void {
-  controlRegistry.register(type, factory);
+/** Register a custom control type. Returns an unregister function. */
+export function registerControl(type: string, factory: ControlFactory): () => void {
+  return controlRegistry.register(type, factory);
 }
 
-/** Register a custom overlay type */
-export function registerOverlay(type: string, factory: OverlayFactory): void {
-  overlayRegistry.register(type, factory);
+/** Register a custom overlay type. Returns an unregister function. */
+export function registerOverlay(type: string, factory: OverlayFactory): () => void {
+  return overlayRegistry.register(type, factory);
 }
 
-/** Register a custom view type */
-export function registerView(type: string, factory: ViewFactory): void {
-  viewRegistry.register(type, factory);
+/** Register a custom view type. Returns an unregister function. */
+export function registerView(type: string, factory: ViewFactory): () => void {
+  return viewRegistry.register(type, factory);
 }
 
 /**
  * Register a dataset kind — the single dataset/source extension point. The
  * kind must be a key of `DatasetConfigMap` (format packages augment that map
- * via `declare module "galavi"`), which types the factory's config exactly.
- * Re-registering an existing key throws, naming the conflicting key.
+ * via `declare module "galavi"`), which types the adapter's config exactly.
+ * Re-registering an existing key throws, naming the conflicting key. Returns
+ * an unregister function.
  */
-export function registerDataset<K extends keyof DatasetConfigMap>(
+export function registerDatasetAdapter<K extends keyof DatasetConfigMap>(
   kind    : K,
-  factory : (config: DatasetConfigMap[K]) => Dataset,
-): void {
-  datasetRegistry.register(kind, factory as DatasetFactory);
+  adapter : (config: DatasetConfigMap[K]) => Dataset,
+): () => void {
+  return datasetRegistry.register(kind, adapter as DatasetAdapter);
 }
