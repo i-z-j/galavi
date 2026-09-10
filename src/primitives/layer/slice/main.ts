@@ -26,7 +26,7 @@ import {
   type AxisIndex,
   type AxisMap,
 } from "../../../utils";
-import type { TilePlacement, TilePlan } from "../../../viewer/tile";
+import { tileId, type TilePlacement, type TilePlan } from "../../../viewer/tile";
 import {
   type Geometry,
   type LayerParams,
@@ -37,7 +37,7 @@ import {
   type TileLevelContext,
   type TileLevelGrid,
   type TiledImageOptions,
-} from "../tiled-image";
+} from "../tiled-image/main";
 import shaderCode from "./shader.wgsl?raw";
 
 // === Square Geometry ===
@@ -275,7 +275,7 @@ export class SliceLayer extends TiledImageLayer {
       gridIdx,
       voxelPos,
       level,
-      id        : `${level}:${sliceIdx},${voxelPos.join(",")}`,
+      id        : tileId(level, [sliceIdx, ...voxelPos]),
       chunkSize : [ctx.levelInfo.chunkSize[uAxis], ctx.levelInfo.chunkSize[vAxis], 1],
       region    : {
         start : [region.start[0], region.start[1], 0],

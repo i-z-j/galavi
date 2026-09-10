@@ -52,7 +52,7 @@ import {
   type PanZoomControlOptions,
 } from "../primitives/control";
 import { ensureBuiltInOverlays, type BaseOverlay } from "../primitives/overlay";
-import { bindNestedViewerRuntime } from "../primitives/overlay/magnifier";
+import { bindNestedViewerRuntime } from "../primitives/overlay/magnifier/main";
 import {
   cameraAngles,
   cameraDistance,

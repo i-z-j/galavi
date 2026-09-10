@@ -3,7 +3,7 @@
  *
  * Renders cross-sections (XY/YZ/XZ) of volumetric data with an
  * orthographic camera derived from the unified camera state. Layer/GPU
- * pipeline lifecycle is delegated to a shared ImagePipeline; SliceView
+ * pipeline lifecycle is delegated to a shared ViewPipeline; SliceView
  * owns the axis permutation and 2D framing math.
  */
 
@@ -14,7 +14,7 @@ import {
   BaseView,
   type Scene,
 } from "./base";
-import { ImagePipeline } from "./image-pipeline";
+import { ViewPipeline } from "./pipeline";
 
 export class SliceView extends BaseView {
   static readonly viewType = "slice";
@@ -54,7 +54,7 @@ export class SliceView extends BaseView {
       addressModeV: "clamp-to-edge",
     });
 
-    this.pipeline = new ImagePipeline({
+    this.pipeline = new ViewPipeline({
       label               : "SliceView",
       device              : this.device,
       cameraBuffer        : this.cameraBuffer,

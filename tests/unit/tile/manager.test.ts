@@ -1,10 +1,13 @@
 /**
  * TileLoadQueue / TileManager tests.
  *
- * The GPU boundary is faked: `TileManager.pool` is a public field, so tests
- * install a duck-typed pool (slot map + upload spy + no-op queue writes)
- * instead of a real `TilePool`/`GPUDevice`. Loaders are deferred promises so
- * the async load lifecycle stays fully deterministic.
+ * The GPU boundary is faked: `TileManager.pool` stays public (custom views
+ * need its texture/buffers), so tests install a duck-typed pool (slot map +
+ * upload spy + no-op queue writes) instead of a real `TilePool`/`GPUDevice`.
+ * Everything else is asserted through public behavior — `commit`,
+ * `hasVisibleTile`, the pool's observable state, and `onUpdate` callbacks —
+ * never by poking the manager's private queue/loadedTiles internals. Loaders
+ * are deferred promises so the async load lifecycle stays fully deterministic.
  */
 import { describe, expect, test, vi } from "vitest";
 import {
@@ -98,6 +101,19 @@ function makeManager(maxConcurrent: number) {
   return { manager, pool };
 }
 
+/** Loader whose fetches are individually resolvable deferreds, keyed by tile id. */
+function deferredLoader() {
+  const fetches = new Map<string, ReturnType<typeof deferred<ArrayBuffer>>>();
+  const loader: TileLoader<TestTile> = {
+    fetch: (tile) => {
+      const d = deferred<ArrayBuffer>();
+      fetches.set(tile.id, d);
+      return d.promise;
+    },
+  };
+  return { loader, fetches };
+}
+
 // ============================================================================
 // TILE LOAD QUEUE
 // ============================================================================
@@ -185,18 +201,11 @@ describe("TileManager", () => {
     const onUpdate = vi.fn();
     manager.setOnUpdate(onUpdate);
 
-    const fetches = new Map<string, ReturnType<typeof deferred<ArrayBuffer>>>();
-    const loader: TileLoader<TestTile> = {
-      fetch: (tile) => {
-        const d = deferred<ArrayBuffer>();
-        fetches.set(tile.id, d);
-        return d.promise;
-      },
-    };
-
+    const { loader, fetches } = deferredLoader();
     const tiles = [makeTile("a", 0), makeTile("b", 1)];
     const first = manager.commit(makePlan(tiles), loader);
     expect(first.displayedLevel).toBeUndefined(); // nothing resident yet
+    expect(first.complete).toBe(false);
     expect(fetches.size).toBe(2);
 
     fetches.get("a")!.resolve(new ArrayBuffer(8));
@@ -205,12 +214,12 @@ describe("TileManager", () => {
 
     expect(pool.uploadTile).toHaveBeenCalledTimes(2);
     expect(onUpdate).toHaveBeenCalledTimes(2);
-    expect(manager.loadedTiles.size).toBe(2);
     expect(manager.hasVisibleTile()).toBe(true);
 
     // Second commit: tiles are resident — no re-fetch, level reported.
     const second = manager.commit(makePlan(tiles), loader);
     expect(second.displayedLevel).toBe(0);
+    expect(second.complete).toBe(true);
     expect(fetches.size).toBe(2);
   });
 
@@ -236,11 +245,25 @@ describe("TileManager", () => {
 
     expect(pool.uploadTile).not.toHaveBeenCalled();
     expect(onUpdate).not.toHaveBeenCalled();
-    expect(manager.loadedTiles.size).toBe(0);
+    expect(manager.hasVisibleTile()).toBe(false);
+
+    // Residency was dropped: re-committing the same plan fetches again.
+    const { loader: reLoader, fetches } = deferredLoader();
+    expect(manager.commit(makePlan([makeTile("a", 0)]), reLoader).complete).toBe(false);
+    expect(fetches.has("a")).toBe(true);
   });
 
   test("replanning aborts superseded loads but preserves resident fallback tiles", async () => {
     const { manager, pool } = makeManager(2);
+
+    // Seed real residency: commit a coarse tile and let its load complete.
+    const { loader: coarseLoader, fetches } = deferredLoader();
+    manager.commit(makePlan([makeTile("coarse", 0)]), coarseLoader);
+    fetches.get("coarse")!.resolve(new ArrayBuffer(8));
+    await flushMicrotasks();
+    expect(pool.getSlot("coarse")).toBeDefined();
+
+    // Switch to a fine plan whose load stays in flight.
     const first = deferred<ArrayBuffer>();
     let firstSignal: AbortSignal | undefined;
     const firstLoader: TileLoader<TestTile> = {
@@ -250,19 +273,24 @@ describe("TileManager", () => {
       },
     };
     manager.commit(makePlan([makeTile("old", 0)]), firstLoader);
-    pool.allocateSlot("coarse");
-    manager.loadedTiles.set("coarse", makeTile("coarse", 0));
 
+    // Replan again: the superseded in-flight load is aborted, the resident
+    // coarse tile survives and covers the new tile as fallback.
     const nextLoader: TileLoader<TestTile> = {
       fetch: () => new Promise(() => {}),
     };
-    manager.commit(makePlan([makeTile("new", 0)]), nextLoader);
+    const result = manager.commit(makePlan([makeTile("new", 0)]), nextLoader);
 
     expect(firstSignal?.aborted).toBe(true);
     expect(pool.getSlot("coarse")).toBeDefined();
-    expect(manager.loadedTiles.has("coarse")).toBe(true);
+    expect(result.complete).toBe(false);
+    expect(result.displayedLevel).toBe(0); // supplied by the coarse fallback
+
+    // The aborted load resolving late must not upload or disturb residency.
     first.resolve(new ArrayBuffer(8));
     await flushMicrotasks();
+    expect(pool.uploadTile).toHaveBeenCalledTimes(1); // only the coarse tile
+    expect(pool.getSlot("coarse")).toBeDefined();
   });
 
   test("a late stale rejection cannot delete a loaded replacement with the same id", async () => {
@@ -276,11 +304,24 @@ describe("TileManager", () => {
     });
     replacement.resolve(new ArrayBuffer(8));
     await flushMicrotasks();
-    expect(manager.loadedTiles.has("a")).toBe(true);
+    expect(manager.commit(makePlan([makeTile("a", 0)]), {
+      fetch: () => new Promise(() => {}),
+    }).complete).toBe(true);
 
     stale.reject(new Error("late stale failure"));
     await flushMicrotasks();
-    expect(manager.loadedTiles.has("a")).toBe(true);
+
+    // "a" must still count as loaded residency: a tile strictly inside its
+    // region finds it as covering fallback, which only loaded tiles provide.
+    const inner = makeTile("inner", 0);
+    inner.region = {
+      start : [0.25, 0.25, 0.25] as [number, number, number],
+      size  : [0.5, 0.5, 0.5] as [number, number, number],
+    };
+    const probe = manager.commit(makePlan([inner]), {
+      fetch: () => new Promise(() => {}),
+    });
+    expect(probe.displayedLevel).toBe(0);
   });
 
   test("reports whether every target tile is resident", async () => {
@@ -295,7 +336,7 @@ describe("TileManager", () => {
     expect(manager.commit(plan, loader).complete).toBe(true);
   });
 
-  test("a failed load is removed from loadedTiles and does not upload", async () => {
+  test("a failed load does not upload and is retried on the next commit", async () => {
     const { manager, pool } = makeManager(4);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
@@ -307,7 +348,12 @@ describe("TileManager", () => {
     await flushMicrotasks();
 
     expect(pool.uploadTile).not.toHaveBeenCalled();
-    expect(manager.loadedTiles.size).toBe(0);
+    expect(manager.hasVisibleTile()).toBe(false);
+
+    // The failure left no residency: re-committing starts a fresh fetch.
+    const { loader: retryLoader, fetches } = deferredLoader();
+    manager.commit(makePlan([makeTile("a", 0)]), retryLoader);
+    expect(fetches.has("a")).toBe(true);
     warn.mockRestore();
   });
 

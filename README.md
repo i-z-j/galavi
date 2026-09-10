@@ -16,7 +16,7 @@ Galavi connects a declarative Dataset boundary to an application-facing Viewer b
 - Built-in views: `volume` (3D perspective), `slice` (2D ortho), `navigator` (3D overview).
 - Built-in controls: `orbit`, `fly`, `panzoom` — pure reducers, view-local.
 - Automatic physical-scale resolution selection with coarse-first loading and dynamic visible storage chunks.
-- Built-in overlays: `crosshair`, `ruler`, `roiselector`, `magnifier-2d`, `magnifier-3d`, `foldablepanel` — bound to a live view, with typed option bags (`OverlayOptionsMap`).
+- Built-in overlays: `crosshair`, `ruler`, `roi-selector`, `magnifier-2d`, `magnifier-3d`, `foldable-panel` — bound to a live view, with typed option bags (`OverlayOptionsMap`).
 - Built-in layers: volume, slice, surface, shape, points, network, segmentation, vectors, tracks.
 - HCS support via the `galavi/ome-zarr` subpath's typed `openOMEZarrPlate` (plate/well/field hierarchy with ready-to-open dataset configs).
 - FUI overlay theme, customizable via `ViewerConfig.theme` and consumable by apps through `--galavi-*` CSS custom properties.

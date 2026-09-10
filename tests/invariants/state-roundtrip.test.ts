@@ -246,7 +246,7 @@ function layerOf(viewer: Viewer, id: string) {
 function roiOverlay(viewer: Viewer, viewId = "main"): RoiSelectorOverlay {
   const overlay = viewer.runtime!.view(viewId).base.getOverlays()
     .find((candidate) => candidate instanceof RoiSelectorOverlay);
-  expect(overlay, `roiselector overlay in view "${viewId}"`).toBeDefined();
+  expect(overlay, `roi-selector overlay in view "${viewId}"`).toBeDefined();
   return overlay as RoiSelectorOverlay;
 }
 

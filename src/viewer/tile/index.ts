@@ -1,27 +1,26 @@
 /**
  * Tile — tile streaming + GPU residency (viewer-side leaf module; imports
- * only `state/schema.ts` from src/).
+ * only `state/schema.ts` and the generic `utils/data-source.ts` helper from
+ * src/).
  *
  * Split into focused modules:
- *   - source.ts   — TileCoord/TileSource, buildTileFetcher, resolveDataUrl,
- *                   sourceChanged
+ *   - source.ts   — TileCoord, buildTileFetcher
  *   - level.ts    — pickPyramidLevel, countPyramidLevelTiles, TileBounds
  *   - queue.ts    — TileLoadQueue
- *   - pool.ts     — TilePool, TilePoolConfig, TileSpec, TileViewport, tileId
- *   - planner.ts  — planTiles, TilePlacement, TilePlan
+ *   - pool.ts     — TilePool, TilePoolConfig, TileSpec, TileViewport
+ *   - planner.ts  — planTiles, tileId, TilePlacement, TilePlan
  *   - manager.ts  — TileManager, TileLoader, TileFramePlan
  *   - volume-policy.ts — planVolumePreview (automatic volume tile budgets)
  *
  * The pure encoding helpers (float16, pack) live in `utils/render/` — the
- * dataset adapters use them, and dataset must not import viewer code.
+ * dataset adapters use them, and dataset must not import viewer code. The
+ * generic `Data` source helpers (dataSourceChanged, resolveDataUrl) live in
+ * `utils/data-source.ts` for the same reason.
  */
 
 export {
   buildTileFetcher,
-  resolveDataUrl,
-  sourceChanged,
   type TileCoord,
-  type TileSource,
 } from "./source";
 
 export {
@@ -35,7 +34,6 @@ export { TileLoadQueue } from "./queue";
 
 export {
   TilePool,
-  tileId,
   type TilePoolConfig,
   type TileSpec,
   type TileViewport,
@@ -43,6 +41,7 @@ export {
 
 export {
   planTiles,
+  tileId,
   type TilePlacement,
   type TilePlan,
 } from "./planner";

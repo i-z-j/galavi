@@ -1,8 +1,8 @@
 import { describe, expect, test, vi } from "vitest";
-import { ImagePipeline } from "../../../src/primitives/view/image-pipeline";
+import { ViewPipeline } from "../../../src/primitives/view/pipeline";
 import type { BaseLayer } from "../../../src/primitives/layer";
 
-describe("ImagePipeline tiled visibility", () => {
+describe("ViewPipeline tiled visibility", () => {
   test("resets once and does not plan tiles while a layer is invisible", () => {
     const planTiles = vi.fn();
     const layer = {
@@ -13,7 +13,7 @@ describe("ImagePipeline tiled visibility", () => {
       getLevelResolution: () => 1,
     } as unknown as BaseLayer;
     const reset = vi.fn();
-    const pipeline = new ImagePipeline({} as ConstructorParameters<typeof ImagePipeline>[0]);
+    const pipeline = new ViewPipeline({} as ConstructorParameters<typeof ViewPipeline>[0]);
     (pipeline as any).states.set(layer.id, {
       layer,
       tileManager: {
@@ -79,10 +79,10 @@ describe("ImagePipeline tiled visibility", () => {
       showingInitialTiles: false,
       lastDataVersion: 0,
     };
-    const pipeline = new ImagePipeline({
+    const pipeline = new ViewPipeline({
       label: "test",
       device: { createBindGroup },
-    } as unknown as ConstructorParameters<typeof ImagePipeline>[0]);
+    } as unknown as ConstructorParameters<typeof ViewPipeline>[0]);
     (pipeline as any).states.set(layer.id, state);
 
     pipeline.updateTiles([layer], () => ({

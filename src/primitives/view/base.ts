@@ -6,7 +6,7 @@
  * shared scene uniforms, canonical layer ordering, and shared frame
  * helpers (camera buffer, depth attachment, render-pass scaffolding).
  *
- * Per-view rendering machinery (`ImagePipeline`) lives in `./runtime/`; the
+ * Per-view rendering machinery (`ViewPipeline`) lives in `./pipeline.ts`; the
  * `createView` factory lives beside the runtime in `src/viewer/runtime.ts`.
  */
 
@@ -30,7 +30,7 @@ import type { BaseControl } from "../control/base";
 import type { BaseOverlay } from "../overlay/base";
 import { DEFAULT_THEME, type GalaviTheme } from "../overlay/theme";
 import type { BaseLayer, LayerLoadState } from "../layer/base";
-import type { ImagePipeline } from "./image-pipeline";
+import type { ViewPipeline } from "./pipeline";
 
 // ============================================================================
 // VIEW OWNER — the narrow runtime surface a view (and its overlays) may use
@@ -136,7 +136,7 @@ export abstract class BaseView {
    * Per-layer raster machinery, assigned by subclasses in initGPUResources.
    * Base hooks optional-chain it because they can fire before init.
    */
-  protected pipeline!: ImagePipeline;
+  protected pipeline!: ViewPipeline;
   private depthTexture?: GPUTexture;
 
   private isInitialized = false;
@@ -188,7 +188,7 @@ export abstract class BaseView {
   /**
    * Hook called by `mount()` when re-mounting on a different canvas whose
    * preferred format differs from the previously-bound canvas. Default
-   * invalidates the shared ImagePipeline; override to invalidate any other
+   * invalidates the shared ViewPipeline; override to invalidate any other
    * format-bound render pipelines the subclass owns.
    */
   protected onCanvasFormatChanged(): void {
@@ -441,7 +441,7 @@ export abstract class BaseView {
 
   /**
    * Called when the layer set changes; default invalidates the shared
-   * ImagePipeline so the next frame re-syncs its per-layer pipelines.
+   * ViewPipeline so the next frame re-syncs its per-layer pipelines.
    */
   protected onLayersChanged(): void {
     this.pipeline?.markDirty();

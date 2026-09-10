@@ -7,11 +7,6 @@
 
 import type { Vec3 } from "../../state/schema";
 import type { TileBounds } from "./level";
-import type { TileCoord } from "./source";
-
-export function tileId(coord: TileCoord): string {
-  return `${coord.level}:${coord.position.join(",")}`;
-}
 
 export interface TilePoolConfig {
   device          : GPUDevice;

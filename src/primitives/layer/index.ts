@@ -58,7 +58,7 @@ export {
 	type TileLevelContext,
 	type TileLevelGrid,
 	type TiledImageOptions,
-} from "./tiled-image";
+} from "./tiled-image/main";
 
 // Concrete layer classes — consumed by registry.ts and views.
 // Layer-internal helper types stay private to each layer subfolder.

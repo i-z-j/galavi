@@ -270,15 +270,16 @@ export { BaseView } from "./primitives/view";
 //   - Colormaps         — getColormapLUT, COLORMAP_NAMES, ColormapName,
 //                         APPEARANCE_PRESETS, resolveAppearancePreset,
 //                         AppearancePresetId, parseHexColor
-//   - Tile / pyramid    — TilePool, TileLoadQueue, TileManager, TileSource,
+//   - Tile / pyramid    — TilePool, TileLoadQueue, TileManager,
 //                         TileLoader, TilePlacement, TilePlan, TileCoord,
 //                         TilePoolConfig, planTiles, tileId, buildTileFetcher,
-//                         sourceChanged, resolveDataUrl,
 //                         countPyramidLevelTiles, pickPyramidLevel,
 //                         TileBounds, TileViewport,
 //                         planVolumePreview + VOLUME_PREVIEW_* budgets
 //                         (automatic volume tile-budget policy),
 //                         floatToFloat16, dtypeNormalization, makeFloat16Encoder
+//   - Data source       — resolveDataUrl, dataSourceChanged (generic `Data`
+//                         config helpers shared by layers)
 //   - Input             — normalizeWheel, normalizeDrag
 //   - Vectors           — cameraBasis, subtract, cross, dot, normalize
 //
@@ -294,8 +295,6 @@ export {
   TileManager,
   tileId,
   buildTileFetcher,
-  sourceChanged,
-  resolveDataUrl,
   pickPyramidLevel,
   countPyramidLevelTiles,
   planTiles,
@@ -307,7 +306,6 @@ export {
   type VolumePreviewPlan,
   type TilePoolConfig,
   type TileCoord,
-  type TileSource,
   type TileSpec,
   type TileFramePlan,
   type TilePlacement,

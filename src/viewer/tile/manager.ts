@@ -1,10 +1,10 @@
 /**
- * Tile manager — composition helper held by tileable layers.
+ * Tile manager — per-view tile residency orchestrator.
  *
- * Owns a `TilePool` + `TileLoadQueue` + loaded placement map and a shared
- * `pump`/`loadOne` runner. Concrete layers compute the per-frame visible
- * `TilePlan` and call `commit(plan, loader)` to push it onto the GPU + load
- * queue.
+ * Held by the per-view `LayerRenderer` inside `ViewPipeline`
+ * (primitives/view/pipeline.ts); layers only return plans. Each frame the
+ * renderer commits the layer's `TilePlan`, and the manager pushes it onto
+ * the GPU (`TilePool`) + load queue (`TileLoadQueue`).
  */
 
 import { TileLoadQueue } from "./queue";
@@ -37,16 +37,14 @@ export interface TileFramePlan<T extends TilePlacement = TilePlacement> {
 }
 
 /**
- * `TileManager<T>` — composition helper held by tileable layers.
- *
- * Owns a `TilePool` + `TileLoadQueue` + loaded placement map and a shared
- * `pump`/`loadOne` runner. Concrete layers compute the per-frame visible
- * `TilePlan` and call `commit(plan, loader)` to push it onto the GPU + load queue.
+ * `TileManager<T>` — owns tile residency for one layer within one view:
+ * the pool slot map, the load queue, and the shared `pump`/`loadOne` runner.
+ * `commit(plan, loader)` is the per-frame entry point.
  */
 export class TileManager<T extends TilePlacement> {
-  pool?                 : TilePool;
-  readonly queue        : TileLoadQueue<T>;
-  readonly loadedTiles  = new Map<string, T>();
+  pool?                        : TilePool;
+  private readonly queue       : TileLoadQueue<T>;
+  private readonly loadedTiles = new Map<string, T>();
   private loader?       : TileLoader<T>;
   private onUpdate?     : () => void;
   private desiredTiles  = new Set<string>();
@@ -61,10 +59,6 @@ export class TileManager<T extends TilePlacement> {
   init(config: TilePoolConfig): void {
     if (this.pool) return;
     this.pool = new TilePool(config);
-  }
-
-  setLoader(loader: TileLoader<T>): void {
-    this.loader = loader;
   }
 
   setOnUpdate(cb?: () => void): void {
@@ -88,9 +82,9 @@ export class TileManager<T extends TilePlacement> {
     *   3. Sort by distance from the visible viewport center.
    *   4. Bind per-frame loader, set the desired set, pump the queue.
    *
-   * Layers must call `setOnUpdate`/`setLoader` once at construction; `commit`
-   * accepts a fresh `loader` per call because the closures usually capture
-   * source / selection / sliceIndex that change between frames.
+   * The view wires `setOnUpdate` once at construction; `commit` accepts a
+   * fresh `loader` per call because the closures usually capture source /
+   * selection / sliceIndex that change between frames.
    */
   commit(
     plan    : TilePlan<T>,
@@ -162,7 +156,7 @@ export class TileManager<T extends TilePlacement> {
         this.distanceFromCenter(b, center, plan.gridDim)
       ));
 
-    this.setLoader(loader);
+    this.loader = loader;
     this.desiredTiles = nextDesired;
     this.queue.setDesired(this.desiredTiles, tilesToLoad);
     this.pump();

@@ -147,7 +147,7 @@ function stopPropagation(event: Event): void {
 // ============================================================================
 
 export class RoiSelectorOverlay extends BaseOverlay {
-  static readonly overlayType = "roiselector";
+  static readonly overlayType = "roi-selector";
 
   private rois        : RoiBox[] = [];
   private activeIndex : number | null = null;

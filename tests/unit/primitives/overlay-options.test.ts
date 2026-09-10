@@ -61,7 +61,7 @@ describe("setOverlayOptions typing (compile-time)", () => {
     // Built-in overlay: exact options bag.
     view.setOverlayOptions("crosshair", { visible: true, position: [0, 0, 0], lineWidth: 2 });
     view.setOverlayOptions("ruler", { visible: true, unit: "µm", resetNonce: 1 });
-    view.setOverlayOptions("roiselector", { enabled: false, activeIndex: null });
+    view.setOverlayOptions("roi-selector", { enabled: false, activeIndex: null });
     view.setOverlayOptions("magnifier-3d", { position: null, voxelExtent3d: 32 });
 
     // @ts-expect-error misspelled key on a built-in overlay is a compile error

@@ -9,10 +9,10 @@
  * - one overlay change produces exactly one event, carrying the interacting
  *   view's id and the composition in effect (`{ rois, change, viewId, composition }`);
  * - subscriptions live on the Viewer and survive composition rebuilds (the
- *   forwarders re-attach to each new scene's roiselector overlays);
+ *   forwarders re-attach to each new scene's roi-selector overlays);
  * - the returned unsubscribe function stops events;
  * - `destroy()` clears subscriptions (a stale forwarder reaches no handler);
- * - the low-level runtime path (`view.setOverlayOptions("roiselector", {
+ * - the low-level runtime path (`view.setOverlayOptions("roi-selector", {
  *   onRoisChange })`) keeps working — the overlay has a single callback slot,
  *   so a low-level callback takes over from the Viewer forwarder until the
  *   next rebuild re-wires it.
@@ -160,7 +160,7 @@ async function makeViewer(config: ViewerConfig): Promise<{ viewer: Viewer; conta
 function roiOverlay(viewer: Viewer, viewId = "main"): RoiSelectorOverlay {
   const overlay = viewer.runtime!.view(viewId).base.getOverlays()
     .find((candidate) => candidate instanceof RoiSelectorOverlay);
-  expect(overlay, `roiselector overlay in view "${viewId}"`).toBeDefined();
+  expect(overlay, `roi-selector overlay in view "${viewId}"`).toBeDefined();
   return overlay as RoiSelectorOverlay;
 }
 
@@ -319,7 +319,7 @@ describe("viewer ROI events", () => {
 
     // The runtime escape hatch takes over the overlay's single callback slot.
     const lowLevel = vi.fn();
-    viewer.runtime!.view("main").setOverlayOptions("roiselector", { onRoisChange: lowLevel });
+    viewer.runtime!.view("main").setOverlayOptions("roi-selector", { onRoisChange: lowLevel });
 
     (removeButtonsIn(container)[0] as HTMLButtonElement).click();
     expect(lowLevel).toHaveBeenCalledTimes(1);

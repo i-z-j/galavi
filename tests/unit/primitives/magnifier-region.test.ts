@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import type { ImagePyramid } from "../../../src/state/schema";
 import { VolumeLayer } from "../../../src/primitives/layer";
-import { computeMagnifierVoxelRegion } from "../../../src/primitives/overlay/magnifier-region";
+import { computeMagnifierVoxelRegion } from "../../../src/primitives/overlay/magnifier/region";
 
 const identityModel = new Float32Array([
   1000, 0, 0, 0,

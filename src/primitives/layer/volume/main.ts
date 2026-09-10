@@ -28,6 +28,7 @@ import {
 } from "../../../utils";
 import {
   planVolumePreview,
+  tileId,
   VOLUME_PREVIEW_POOL_HEADROOM,
   type TilePlacement,
   type TilePlan,
@@ -44,7 +45,7 @@ import {
   type TileLevelContext,
   type TileLevelGrid,
   type TiledImageOptions,
-} from "../tiled-image";
+} from "../tiled-image/main";
 import { VOLUME_STEP_SIZE } from "../../../defaults";
 import shaderCode from "./shader.wgsl?raw";
 
@@ -253,7 +254,7 @@ export class VolumeLayer extends TiledImageLayer {
       gridIdx,
       voxelPos,
       level,
-      id        : `${level}:${voxelPos.join(",")}`,
+      id        : tileId(level, voxelPos),
       chunkSize : [...ctx.levelInfo.chunkSize] as Vec3,
       region    : {
         start : [...region.start] as Vec3,

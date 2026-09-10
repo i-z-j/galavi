@@ -21,7 +21,7 @@
  *                                            when a new element arrives.
  *   onOpenChange?: (open: boolean) => void — fired on user toggles only.
  *
- * Registration: `registerOverlay("foldablepanel", () => new FoldablePanelOverlay())`.
+ * Registration: `registerOverlay("foldable-panel", () => new FoldablePanelOverlay())`.
  */
 
 import type { State } from "../../state/schema";
@@ -48,7 +48,7 @@ function chevronSvg(direction: "left" | "right", size = 16): string {
 // ============================================================================
 
 export class FoldablePanelOverlay extends BaseOverlay {
-  static readonly overlayType = "foldablepanel";
+  static readonly overlayType = "foldable-panel";
 
   private tabZone?    : HTMLDivElement;
   private tabBar?     : HTMLDivElement;

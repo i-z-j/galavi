@@ -19,23 +19,23 @@ import type {
   ImagePyramidLevel,
   LayerConfig,
   Vec3,
-} from "../../state/schema";
+} from "../../../state/schema";
 import {
+  dataSourceChanged,
   optBoolean,
   type AxisIndex,
-} from "../../utils";
+} from "../../../utils";
 import {
   buildTileFetcher,
   pickPyramidLevel,
   planTiles,
-  sourceChanged,
   type TileFramePlan,
   type TilePlacement,
   type TilePlan,
   type TileSpec,
   type TileViewport,
-} from "../../viewer/tile";
-import { BaseLayer, type LayerLoadStatus } from "./base";
+} from "../../../viewer/tile";
+import { BaseLayer, type LayerLoadStatus } from "../base";
 
 /** Options shared by every tiled image layer. */
 export interface TiledImageOptions {
@@ -217,7 +217,7 @@ export abstract class TiledImageLayer extends BaseLayer {
 
   /** Update the data source (e.g., when channel changes) */
   override setSource(source: Data): void {
-    if (!sourceChanged(source, this.source)) return;
+    if (!dataSourceChanged(source, this.source)) return;
     this.source = source;
     this.dataVersion++;
   }

@@ -11,7 +11,7 @@
 
 import type { Vec3 } from "../../state/schema";
 import type { DeepPartial, GalaviTheme } from "./theme";
-import type { MagnifierOptions } from "./magnifier";
+import type { MagnifierOptions } from "./magnifier/main";
 import type {
   RoiActiveIndexChangeCallback,
   RoiBox,
@@ -53,7 +53,7 @@ export interface RulerOverlayOptions extends BaseOverlayOptions {
   resetNonce? : number;
 }
 
-/** Options for the built-in `"roiselector"` overlay. */
+/** Options for the built-in `"roi-selector"` overlay. */
 export interface RoiSelectorOverlayOptions extends BaseOverlayOptions {
   /** ROI boxes in physical coordinates. */
   rois?                : RoiBox[];
@@ -65,7 +65,7 @@ export interface RoiSelectorOverlayOptions extends BaseOverlayOptions {
   onActiveIndexChange? : RoiActiveIndexChangeCallback;
 }
 
-/** Options for the built-in `"foldablepanel"` overlay. */
+/** Options for the built-in `"foldable-panel"` overlay. */
 export interface FoldablePanelOverlayOptions extends BaseOverlayOptions {
   /** Edge to dock to (default: "left"). */
   side?         : "left" | "right";
@@ -96,8 +96,8 @@ export interface MagnifierOverlayOptions extends MagnifierOptions, BaseOverlayOp
 export interface OverlayOptionsMap {
   "crosshair"     : CrosshairOverlayOptions;
   "ruler"         : RulerOverlayOptions;
-  "roiselector"   : RoiSelectorOverlayOptions;
-  "foldablepanel" : FoldablePanelOverlayOptions;
+  "roi-selector"  : RoiSelectorOverlayOptions;
+  "foldable-panel": FoldablePanelOverlayOptions;
   "magnifier-2d"  : MagnifierOverlayOptions;
   "magnifier-3d"  : MagnifierOverlayOptions;
 }

@@ -33,6 +33,12 @@ export {
   aabbFromPositions,
 } from "./render/geometry";
 
+// Data source helpers (reload guard + URL resolution for `Data` configs)
+export {
+  dataSourceChanged,
+  resolveDataUrl,
+} from "./data-source";
+
 // Colormaps and appearance presets
 export {
   getColormapLUT,

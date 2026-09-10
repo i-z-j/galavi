@@ -1,5 +1,5 @@
 import { mat4 } from "wgpu-matrix";
-import type { ImagePyramid, Vec3 } from "../../state/schema";
+import type { ImagePyramid, Vec3 } from "../../../state/schema";
 
 export interface MagnifierRegion {
   /** Level-0 voxel origin after sliding the fixed-size region inside the data. */

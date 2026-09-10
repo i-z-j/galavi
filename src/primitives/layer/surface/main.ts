@@ -17,12 +17,13 @@ import type { AABB, SurfaceGeometry } from "../../../state/schema";
 import { parseOBJ } from "../../../dataset/adapters/mesh";
 import {
   UNIT_CUBE,
+  dataSourceChanged,
   optBoolean,
   optVec3,
   parseHexColor,
   aabbFromPositions,
+  resolveDataUrl,
 } from "../../../utils";
-import { resolveDataUrl, sourceChanged } from "../../../viewer/tile";
 import {
   BaseLayer,
   transformAABB,
@@ -241,7 +242,7 @@ export class SurfaceLayer extends BaseLayer {
    * through `loadError` and the render channel.
    */
   override setSource(source: Data): void {
-    if (!sourceChanged(source, this.source)) return;
+    if (!dataSourceChanged(source, this.source)) return;
     this.source           = source;
     // Reset so loadSurfaceFromSource re-fetches
     this.isSurfaceLoaded  = false;

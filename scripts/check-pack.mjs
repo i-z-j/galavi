@@ -40,8 +40,8 @@
  *      consumer that imports ONLY `omeZarr` proves the registration side
  *      effect survives tree-shaking — and typechecks the consumer snippets
  *      (north-star, root-only, low-level surface, JSON-only rejections,
- *      descriptor helpers, state schema) against the installed package
- *      (with the package's own TypeScript).
+ *      descriptor helpers, state schema, removed-API probes) against the
+ *      installed package (with the package's own TypeScript).
  */
 import { execFileSync } from "node:child_process";
 import {
@@ -687,8 +687,33 @@ void normalized;
 // @ts-expect-error — getState()/setState() are the state surface; there is no viewer.config
 viewer.config;
 `);
+  // The removed cleanup-era APIs stay absent at the consumer boundary:
+  // renamed helpers, deleted types, and members taken off the public classes.
+  const removedApi = join(app, "removed-api.ts");
+  writeFileSync(removedApi, `
+import { dataSourceChanged, resolveDataUrl, MagnifierOverlay, TileManager } from "galavi";
+void [dataSourceChanged, resolveDataUrl, MagnifierOverlay, TileManager];
+
+// @ts-expect-error — renamed dataSourceChanged; there is no sourceChanged alias
+import { sourceChanged } from "galavi";
+void sourceChanged;
+
+// @ts-expect-error — the duplicate tile-source type was removed; use Data/ImagePyramidResource + TileLoader<T>
+import type { TileSource } from "galavi";
+void (0 as unknown as TileSource | undefined);
+
+// @ts-expect-error — setLoader was removed; commit(plan, loader) receives the loader
+TileManager.prototype.setLoader;
+// @ts-expect-error — the load queue is private; compose a standalone TileLoadQueue instead
+TileManager.prototype.queue;
+// @ts-expect-error — loadedTiles is private; use commit/hasVisibleTile behavior
+TileManager.prototype.loadedTiles;
+
+// @ts-expect-error — one implementation serves two registry IDs; no single static identity
+MagnifierOverlay.overlayType;
+`);
   if (!existsSync(TSC)) fail(`TypeScript not found at ${TSC} — run bun install first`);
-  for (const file of [snippet, rootOnly, lowLevelSnippet, rejections, identity, plate, helpers, stateSnippet]) {
+  for (const file of [snippet, rootOnly, lowLevelSnippet, rejections, identity, plate, helpers, stateSnippet, removedApi]) {
     execFileSync(
       process.execPath,
       [

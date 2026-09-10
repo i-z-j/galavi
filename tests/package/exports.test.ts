@@ -93,6 +93,18 @@ void staleOverrides;
 import { encodeState as encodeStateFromRoot } from "../../src/index";
 // @ts-expect-error — state transport is plain JSON; no codec helpers exist
 import { decodeState as decodeStateFromRoot } from "../../src/index";
+// @ts-expect-error — renamed dataSourceChanged and moved to utils/data-source.ts; there is no alias
+import { sourceChanged as sourceChangedRemoved } from "../../src/index";
+// @ts-expect-error — the duplicate tile-source type was removed; use Data/ImagePyramidResource + TileLoader<T>
+import type { TileSource as TileSourceRemoved } from "../../src/index";
+// tileId is still exported, but the old tileId(coord: TileCoord) call shape is gone.
+import { tileId } from "../../src/index";
+import type { TileCoord } from "../../src/index";
+// @ts-expect-error — tileId takes (level, coordinates); a TileCoord object is no longer accepted
+const staleTileIdCall: () => string = () => tileId({ level: 0, position: [0, 0, 0] } as TileCoord);
+void staleTileIdCall;
+const currentTileIdCall: string = tileId(0, [0, 0, 0]);
+void currentTileIdCall;
 
 // The `composition` vocabulary compiles on ViewerConfig.
 const quadCompositionConfig: ViewerConfig = { composition: { type: "quad" } };
@@ -194,6 +206,7 @@ const ROOT_VALUES = [
   "computePosition",
   "countPyramidLevelTiles",
   "cross",
+  "dataSourceChanged",
   "dot",
   "dtypeNormalization",
   "fitSliceCamera",
@@ -223,7 +236,6 @@ const ROOT_VALUES = [
   "screenToSlicePhysical",
   "screenToVolumeTargetPlane",
   "sliceUnitsPerPixel",
-  "sourceChanged",
   "subtract",
   "tileId",
   "volumeUnitsPerPixel",
@@ -286,6 +298,7 @@ describe("entry surfaces", () => {
       expect("createDataset" in entry).toBe(false);
       expect("registerSource" in entry).toBe(false);
       expect("createSliceGrid" in entry).toBe(false);
+      expect("sourceChanged" in entry).toBe(false);
     }
   });
 
@@ -361,14 +374,17 @@ describe("entry surfaces", () => {
     type DefaultLayersProbe = DefaultLayersOptionsRemoved;
     type ViewerModeProbe = ViewerModeRemoved;
     type ViewerStateProbe = ViewerStateRemoved;
+    type TileSourceProbe = TileSourceRemoved;
     void (0 as unknown as CapabilitiesProbe | undefined);
     void (0 as unknown as DefaultLayersProbe | undefined);
     void (0 as unknown as ViewerModeProbe | undefined);
     void (0 as unknown as ViewerStateProbe | undefined);
+    void (0 as unknown as TileSourceProbe | undefined);
     void getDatasetCapabilitiesRemoved;
     void ImageDatasetRemoved;
     void createDatasetAbsent;
     void registerSourceAbsent;
     void createSliceGridRemoved;
+    void sourceChangedRemoved;
   });
 });

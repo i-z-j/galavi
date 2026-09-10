@@ -516,7 +516,7 @@ export abstract class BaseLayer {
    *
    * G1 invariant: `applyDataSource` must call `setSource(desc.data)` exactly
    * once when `desc.data` is present. Re-fetch is prevented downstream by
-   * `sourceChanged()` guards inside layers that fetch external resources
+   * `dataSourceChanged()` guards inside layers that fetch external resources
    * (SurfaceLayer, ShapesLayer). Do NOT bypass this single dispatch path.
    */
   applyConfig(desc: LayerConfig, physical?: PhysicalSpace): void {
@@ -580,7 +580,7 @@ export abstract class BaseLayer {
 
   /**
    * Data source dispatch. G1: must call `setSource(desc.data)` exactly once
-   * when present. The `sourceChanged()` guard inside concrete `setSource`
+   * when present. The `dataSourceChanged()` guard inside concrete `setSource`
    * implementations is the only thing preventing per-frame re-fetches.
    */
   protected applyDataSource(desc: LayerConfig): void {

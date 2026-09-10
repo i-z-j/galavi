@@ -20,7 +20,7 @@ import {
   BaseView,
   type Scene,
 } from "./base";
-import { ImagePipeline } from "./image-pipeline";
+import { ViewPipeline } from "./pipeline";
 
 export class NavigatorView extends BaseView {
   static readonly viewType = "navigator";
@@ -37,9 +37,9 @@ export class NavigatorView extends BaseView {
     this.cameraBuffer = this.createCameraBuffer("NavigatorView Camera Buffer");
 
     // Navigator never renders tiled image data, so texture/colormap samplers
-    // are not provided — ImagePipeline's tiled-layer guard would throw if a
+    // are not provided — ViewPipeline's tiled-layer guard would throw if a
     // tiled layer were ever assigned here.
-    this.pipeline = new ImagePipeline({
+    this.pipeline = new ViewPipeline({
       label               : "NavigatorView",
       device              : this.device,
       cameraBuffer        : this.cameraBuffer,

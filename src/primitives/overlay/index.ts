@@ -6,14 +6,16 @@ import { overlayRegistry } from "../../registry";
 import { CrosshairOverlay } from "./crosshair";
 import { RulerOverlay } from "./ruler";
 import { RoiSelectorOverlay } from "./roi-selector";
-import { MagnifierOverlay } from "./magnifier";
+import { MagnifierOverlay } from "./magnifier/main";
 import { FoldablePanelOverlay } from "./foldable-panel";
 
 /**
  * Idempotent built-in bootstrap: registers the built-in overlay types in
- * `overlayRegistry`. Double-invocation is a no-op. The magnifier appears as
- * two separate tool entries over one implementation parameterized by
- * dimension.
+ * `overlayRegistry`. Double-invocation is a no-op. Ordinary one-ID overlays
+ * self-report through the static `OverlayClass.overlayType` contract; the
+ * magnifier has no single identity — one implementation is parameterized by
+ * dimension, so it registers `magnifier-2d` and `magnifier-3d` via explicit
+ * factories instead.
  */
 export function ensureBuiltInOverlays(): void {
   for (const cls of [
@@ -52,7 +54,7 @@ export {
   MagnifierOverlay,
   type MagnifierDimension,
   type MagnifierOptions,
-} from "./magnifier";
+} from "./magnifier/main";
 export { FoldablePanelOverlay } from "./foldable-panel";
 export {
   type BaseOverlayOptions,

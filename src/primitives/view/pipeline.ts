@@ -1,5 +1,5 @@
 /**
- * Image pipeline — shared raster machinery for views.
+ * View pipeline — shared raster machinery for views.
  *
  * Owns the per-layer GPU pipeline cache used by VolumeView, SliceView, and
  * NavigatorView. Per-frame protocol:
@@ -27,11 +27,11 @@ import {
 import { sortedByBlending } from "./base";
 
 // ============================================================================
-// IMAGE PIPELINE
+// VIEW PIPELINE
 // ============================================================================
 
 /**
- * Per-layer renderer cached inside an `ImagePipeline`.
+ * Per-layer renderer cached inside a `ViewPipeline`.
  *
  * Owns the GPU residency for one layer in one view: pipeline + bind groups,
  * params/model/storage buffers, colormap texture, and (for tiled image
@@ -67,7 +67,7 @@ interface LayerRenderer {
   lastColormapVersion: number;
 }
 
-export interface ImagePipelineOpts {
+export interface ViewPipelineOptions {
   /** Label prefix for GPU object names. */
   label                : string;
   device               : GPUDevice;
@@ -94,11 +94,11 @@ export interface ImagePipelineOpts {
   requestRender?       : () => void;
 }
 
-export class ImagePipeline {
+export class ViewPipeline {
   private states = new Map<string, LayerRenderer>();
   private dirty  = true;
 
-  constructor(private opts: ImagePipelineOpts) {}
+  constructor(private opts: ViewPipelineOptions) {}
 
   /** Mark the cache as needing a full sync. */
   markDirty(): void {
@@ -402,7 +402,7 @@ export class ImagePipeline {
       // (tilePool implies needsModel=true, so modelBuffer exists)
       if (!textureSampler || !colormapSampler) {
         throw new Error(
-          `[ImagePipeline ${label}] tiled layer "${layer.id}" requires textureSampler and colormapSampler in opts`,
+          `[ViewPipeline ${label}] tiled layer "${layer.id}" requires textureSampler and colormapSampler in opts`,
         );
       }
       const tileModelBuffer = modelBuffer!;

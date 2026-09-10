@@ -155,7 +155,7 @@ export type ViewerMagnifierOptions = MagnifierOverlayOptions & {
  * application through the typed Viewer events — `viewer.on("roiChange" |
  * "roiActiveChange", handler)`; callback-bearing overlay options remain
  * available on the low-level runtime path
- * (`view.setOverlayOptions("roiselector", ...)`).
+ * (`view.setOverlayOptions("roi-selector", ...)`).
  */
 export type ViewerRoiOptions = Omit<
   RoiSelectorOverlayOptions,
@@ -164,7 +164,7 @@ export type ViewerRoiOptions = Omit<
 
 /**
  * Declarative tool set. Tools map to built-in overlays: crosshair →
- * `"crosshair"`, ruler → `"ruler"`, roi → `"roiselector"`, magnifier →
+ * `"crosshair"`, ruler → `"ruler"`, roi → `"roi-selector"`, magnifier →
  * `"magnifier-2d"`/`"magnifier-3d"`. `true` enables with defaults, an options
  * bag enables with those options, `false`/absent disables. When `tools` is
  * present it fully specifies the tool set. Options bags are JSON-serializable
@@ -416,7 +416,7 @@ function assertSerializableToolOptions(
       `${context}: tools.${name}.${key} is a function — high-level tool options are JSON-serializable only. ` +
       (name === "roi"
         ? 'Subscribe via viewer.on("roiChange" | "roiActiveChange", handler) for ROI notifications, ' +
-          'or use the low-level runtime path: view.setOverlayOptions("roiselector", { onRoisChange }).'
+          'or use the low-level runtime path: view.setOverlayOptions("roi-selector", { onRoisChange }).'
         : "Callback-bearing overlay options live on the low-level runtime path: view.setOverlayOptions(...)."),
     );
   }
@@ -725,7 +725,7 @@ function expandViewerTools(tools: ViewerToolsConfig | undefined, viewType: strin
   };
   put("crosshair", tools.crosshair);
   put("ruler", tools.ruler);
-  put("roiselector", tools.roi);
+  put("roi-selector", tools.roi);
   const magnifier = tools.magnifier;
   if (magnifier !== undefined && magnifier !== false) {
     let dimension: "2d" | "3d";
@@ -747,7 +747,7 @@ function toolOverlayTypes(name: ViewerToolName): string[] {
   switch (name) {
     case "crosshair": return ["crosshair"];
     case "ruler":     return ["ruler"];
-    case "roi":       return ["roiselector"];
+    case "roi":       return ["roi-selector"];
     case "magnifier": return ["magnifier-2d", "magnifier-3d"];
   }
 }
@@ -924,7 +924,8 @@ export class Viewer {
    * overlay keys with `getOverlays()` (createView instantiates in
    * `Object.entries` order); runtime attach/detach keeps it current. Needed
    * because instance classes do not reliably self-report their registry type
-   * (e.g. the magnifier's static `overlayType` is always `"magnifier-2d"`).
+   * (e.g. `MagnifierOverlay` has no static `overlayType`; it is registered
+   * explicitly as both `"magnifier-2d"` and `"magnifier-3d"`).
    */
   private _liveOverlays = new Map<string, Map<string, BaseOverlay>>();
   private _status: ViewerStatus = "idle";
@@ -940,7 +941,7 @@ export class Viewer {
   /**
    * High-level event subscriptions. They live on the Viewer — not on
    * any runtime/overlay instance — so they survive open/composition rebuilds;
-   * the forwarders are re-attached to each new scene's roiselector overlays.
+   * the forwarders are re-attached to each new scene's roi-selector overlays.
    * Cleared on `destroy()`.
    */
   private readonly _eventHandlers: {
@@ -1711,7 +1712,7 @@ export class Viewer {
 
   /**
    * Runtime tool access with the same typed options as the declarative
-   * `tools` key. Tools map to built-in overlays (crosshair/ruler/roiselector/
+   * `tools` key. Tools map to built-in overlays (crosshair/ruler/roi-selector/
    * magnifier-2d/3d) attached to the current composition's views.
    */
   tool<K extends ViewerToolName>(name: K): ViewerToolAccessor<ViewerToolOptionsMap[K]> {
@@ -2059,7 +2060,7 @@ export class Viewer {
       keys.forEach((type, i) => byType.set(type, instances[i]));
       this._liveOverlays.set(id, byType);
       // Forward ROI overlay changes to the Viewer event surface.
-      const roiOverlay = byType.get("roiselector");
+      const roiOverlay = byType.get("roi-selector");
       if (roiOverlay) this._wireRoiOverlay(roiOverlay, id);
     }
 
@@ -2118,7 +2119,7 @@ export class Viewer {
   }
 
   /**
-   * Attach the ROI event forwarders to a live roiselector overlay.
+   * Attach the ROI event forwarders to a live roi-selector overlay.
    * Runs on every scene rebuild and on runtime tool attach, so Viewer-level
    * subscriptions keep firing across runtime rebuilds. The overlay only ever
    * sees the forwarders — user callbacks never enter the overlay options
@@ -2458,7 +2459,7 @@ export class Viewer {
             base.addOverlay(overlay);
             live.set(type, overlay);
             // Forward ROI overlay changes to the Viewer event surface.
-            if (type === "roiselector") this._wireRoiOverlay(overlay, id);
+            if (type === "roi-selector") this._wireRoiOverlay(overlay, id);
             const parent = base.canvasElement?.parentElement;
             if (parent) {
               try {

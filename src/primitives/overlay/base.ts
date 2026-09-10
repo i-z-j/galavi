@@ -46,9 +46,11 @@ export type OverlayLabelVariant   = "badge" | "panel" | "tooltip";
 // ============================================================================
 
 /**
- * Static contract for overlay classes registered via `overlayRegistry`. Each
- * concrete overlay declares its `overlayType` string and the registry
- * instantiates via `new cls()` directly.
+ * Static contract for ordinary one-ID overlay classes registered via
+ * `overlayRegistry`. Each concrete overlay declares its `overlayType` string
+ * and the registry instantiates via `new cls()` directly. Overlays whose
+ * instances are parameterized (e.g. one class serving several registry IDs)
+ * skip this contract and register explicit factories instead.
  */
 export interface OverlayClass {
   readonly overlayType: string;

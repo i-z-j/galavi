@@ -3,9 +3,10 @@
  *
  * Public extension surface for views, plus the idempotent built-in bootstrap
  * ({@link ensureBuiltInViews}) that fills `viewRegistry` — invoked by the
- * resolution boundaries (`createViewerRuntime`), never at import time. The
- * `runtime/` subfolder (image pipeline, scene uniform layout) is internal
- * machinery — imported directly by concrete views, not re-exported here.
+ * resolution boundaries (`createViewerRuntime`), never at import time.
+ * `pipeline.ts` (`ViewPipeline`, the per-view renderer coordinator) is
+ * internal machinery — imported directly by concrete views, deliberately not
+ * re-exported here or from the package root.
  */
 
 import { viewRegistry, type ViewFactory } from "../../registry";

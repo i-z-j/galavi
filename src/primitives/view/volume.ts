@@ -3,7 +3,7 @@
  *
  * Renders volumetric data with depth testing under a perspective camera
  * derived from the unified camera state. Layer/GPU pipeline lifecycle is
- * delegated to a shared ImagePipeline; VolumeView owns the camera math,
+ * delegated to a shared ViewPipeline; VolumeView owns the camera math,
  * mode-transition tween, and depth attachment.
  */
 
@@ -12,7 +12,7 @@ import {
   BaseView,
   type Scene,
 } from "./base";
-import { ImagePipeline } from "./image-pipeline";
+import { ViewPipeline } from "./pipeline";
 import {
   DEFAULT_FOV,
   NEAR_CLIP_FACTOR,
@@ -56,7 +56,7 @@ export class VolumeView extends BaseView {
       addressModeV: "clamp-to-edge",
     });
 
-    this.pipeline = new ImagePipeline({
+    this.pipeline = new ViewPipeline({
       label               : "VolumeView",
       device              : this.device,
       cameraBuffer        : this.cameraBuffer,

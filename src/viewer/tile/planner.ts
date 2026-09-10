@@ -6,6 +6,15 @@ import type { Vec3 } from "../../state/schema";
 import type { TileBounds } from "./level";
 
 /**
+ * Canonical tile identity: identifies a placement, not a fetch coordinate
+ * (`TileCoord`). `coordinates` are the planner-grid coordinates the layer
+ * placed the tile at (volume: `voxelPos`; slice: `[sliceIdx, ...voxelPos]`).
+ */
+export function tileId(level: number, coordinates: readonly number[]): string {
+  return `${level}:${coordinates.join(",")}`;
+}
+
+/**
  * A tile placed at a planner grid cell. Carries the load `id`, its grid
  * index, voxel-space position, and pyramid level. Concrete layers may
  * extend `T` with extra fields they need at fetch time.

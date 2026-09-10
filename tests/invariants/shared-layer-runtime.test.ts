@@ -376,7 +376,7 @@ describe("shared layer retry and precedence", () => {
     expect(layer.loadStatus).toBe("ready");
     expect(fetchSpy).toHaveBeenCalledTimes(2); // one fetch per generation
 
-    // Re-applying the SAME source is a no-op (sourceChanged guard).
+    // Re-applying the SAME source is a no-op (dataSourceChanged guard).
     runtime.layer("s")!.setData({ url: "mem://good.obj" });
     applyConfig(runtime, "s");
     await flushMicrotasks();
